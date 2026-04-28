@@ -1,21 +1,25 @@
-Reflectance Sensor Code:
-
 const uint8_t SensorCount = 9;
-const uint8_t sensorPins[] = {2 ,3, 4, 5, 6, 7, 8, 9, 10};
-const uint8_t emitterPin = 11;
+const uint8_t sensorPins[] = {2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+// Define both control pins
+const uint8_t emitterPinOdd = 11;  
+const uint8_t emitterPinEven = 12; 
 
 void setup() {
+  // 1. THE LIFELINE
   delay(5000);
   
   Serial.begin(9600);
   Serial.println("SYSTEM BOOT: Library-Bypass Diagnostic Started");
 
-  // Turn on the IR LEDs manually
-  pinMode(emitterPin, OUTPUT);
-  digitalWrite(emitterPin, HIGH); 
+  // 2. Turn on ALL IR LEDs (Both Odd and Even banks)
+  pinMode(emitterPinOdd, OUTPUT);
+  pinMode(emitterPinEven, OUTPUT);
+  digitalWrite(emitterPinOdd, HIGH); 
+  digitalWrite(emitterPinEven, HIGH); 
   
-  Serial.println("Emitters ON. Reading pins directly. Wave white paper.");
-  Serial.println("P3\tP4\tP5\tP6\tP7\tP8\tP9\tP10\tP11");
+  Serial.println("ALL Emitters ON. Reading pins directly. Wave white paper.");
+  Serial.println("P2\tP3\tP4\tP5\tP6\tP7\tP8\tP9\tP10");
   Serial.println("-------------------------------------------------------------------------");
 }
 
