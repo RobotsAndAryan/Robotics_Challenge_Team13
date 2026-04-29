@@ -8,7 +8,7 @@ int encB = 24;
 
 volatile long pos = 0;
 long last = 0;
-int spd = 3000;
+int spd = 10000;
 
 void setup() {
   Serial.begin(115200);
