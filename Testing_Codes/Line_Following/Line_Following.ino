@@ -9,82 +9,101 @@ int SensorCount = 9;
 const uint8_t emitterPinOdd = 11;  
 const uint8_t emitterPinEven = 12; 
 
-int spd = 500;
+uint16_t min_time[9] = {1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000};
+uint16_t max_time[9] = {0};
+int last_error = 0;
+int spd = 200; 
 
-void navigation_and_movement(char dir){
-  switch (dir){
-    case 'w': 
-      mc.setSpeed(1, spd); 
-      mc.setSpeed(2, spd);
-      break;
-    case 's': 
-      mc.setSpeed(1, -spd);
-      mc.setSpeed(2, -spd);
-      break;
-    case 'a': 
-      mc.setSpeed(1, spd - 100);
-      mc.setSpeed(2, spd + 100);
-      break;
-    case 'd': 
-      mc.setSpeed(1, spd + 100);
-      mc.setSpeed(2, spd - 100);
-      break; 
-    default: 
-      mc.setSpeed(1, 0);
-      mc.setSpeed(2, 0);
-  }
-}
-
-void line_detecting(uint16_t* sensorValues){
-  for (uint8_t i = 0; i < SensorCount; i++) {
+void line_detecting(uint16_t* vals){
+  for (int i = 0; i < SensorCount; i++) {
     pinMode(SensorPins[i], OUTPUT);
     digitalWrite(SensorPins[i], HIGH);
   }
 
   delayMicroseconds(15);
 
-  for (uint8_t i = 0; i < SensorCount; i++) {
+  for (int i = 0; i < SensorCount; i++) {
     pinMode(SensorPins[i], INPUT);
-    sensorValues[i] = 1000; 
+    vals[i] = 1000; 
   }
 
-  unsigned long startTime = micros();
-  while (micros() - startTime < 1000) { 
-    for (uint8_t i = 0; i < SensorCount; i++) {
-      if (sensorValues[i] == 1000 && digitalRead(SensorPins[i]) == LOW) {
-        sensorValues[i] = micros() - startTime;
+  unsigned long st = micros();
+  while (micros() - st < 1000) { 
+    for (int i = 0; i < SensorCount; i++) {
+      if (vals[i] == 1000 && digitalRead(SensorPins[i]) == LOW) {
+        vals[i] = micros() - st;
       }
     }
   }
 }
 
 void line_calibration(){
-  uint16_t max_time[9] = {0};
-  uint16_t min_time[9] = {1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000};
-  uint16_t line_data[9];
-
+  uint16_t raw[9];
   delay(1000);
-  Serial.println("Line Calibration Time , slide the robot accross the line");
+  Serial.println("calibrating... slide over line");
   
-  unsigned long time_start = millis();
-  while((millis() - time_start) < 3000) {
-    line_detecting(line_data);
+  unsigned long t = millis();
+  while((millis() - t) < 3000) {
+    line_detecting(raw);
     for (int i = 0; i < SensorCount; i++) {
-      if (line_data[i] > max_time[i]) max_time[i] = line_data[i];
-      if (line_data[i] < min_time[i]) min_time[i] = line_data[i];
+      if (raw[i] > max_time[i]) max_time[i] = raw[i];
+      if (raw[i] < min_time[i]) min_time[i] = raw[i];
     }
   }
-  Serial.println("calibration done");
+  Serial.println("done calib");
 }
 
-void line_following_and_motor_correction(){
+void follow_line(){
+  uint16_t raw[9];
+  line_detecting(raw);
+
+  long w_sum = 0;
+  long sum = 0;
+
+  for(int i = 0; i < SensorCount; i++) {
+    uint16_t v = raw[i];
+    if (v < min_time[i]) v = min_time[i];
+    if (v > max_time[i]) v = max_time[i];
+
+    long range = max_time[i] - min_time[i];
+    long norm = 0;
+    
+    if (range > 0) {
+      norm = 1000L - (((v - min_time[i]) * 1000L) / range); 
+    }
+
+    if (norm > 50) {
+      w_sum += norm * (i * 1000L);
+      sum += norm;
+    }
+  }
+
+  int pos = 4000; 
+  if (sum > 0) pos = w_sum / sum;
+
+  int err = pos - 4000;
   
+  float kp = 0.05; 
+  float kd = 0.15; 
+
+  int turn = (err * kp) + ((err - last_error) * kd);
+  last_error = err;
+
+  int l_spd = spd + turn;
+  int r_spd = spd - turn;
+
+  if (l_spd > 400) l_spd = 400;
+  if (l_spd < -400) l_spd = -400;
+  if (r_spd > 400) r_spd = 400;
+  if (r_spd < -400) r_spd = -400;
+
+  mc.setSpeed(1, l_spd);
+  mc.setSpeed(2, r_spd);
 }
 
 void setup(){
   delay(2000);
   Serial.begin(115200);
-  Serial.println("Arduino Working ");
   Wire.begin();
   Wire1.begin();
 
@@ -107,13 +126,11 @@ void setup(){
   pinMode(emitterPinEven, OUTPUT);
   digitalWrite(emitterPinOdd, HIGH); 
   digitalWrite(emitterPinEven, HIGH); 
+
+  line_calibration();
 }
 
 void loop(){
-  if (Serial.available() > 0){
-    char incoming = Serial.read();
-    if(incoming != '\n' && incoming != '\r') {
-      navigation_and_movement(incoming);
-    }
-  }
+  follow_line();
+  delay(5);
 }
