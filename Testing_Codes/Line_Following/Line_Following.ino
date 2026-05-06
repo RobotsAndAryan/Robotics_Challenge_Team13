@@ -12,6 +12,7 @@ const uint8_t emitterPinEven = 12;
 uint16_t min_time[9] = {1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000};
 uint16_t max_time[9] = {0};
 int last_error = 0;
+long integral = 0; 
 int spd = 200; 
 
 void line_detecting(uint16_t* vals){
@@ -83,10 +84,16 @@ void follow_line(){
 
   int err = pos - 4000;
   
-  float kp = 0.05; 
-  float kd = 0.15; 
+  integral += err;
+  if(integral > 50000) integral = 50000; 
+  if(integral < -50000) integral = -50000;
+  if(err == 0) integral = 0;
+  
+  float kp = 0.12; 
+  float ki = 0.0005; 
+  float kd = 0.25; 
 
-  int turn = (err * kp) + ((err - last_error) * kd);
+  int turn = (err * kp) + (integral * ki) + ((err - last_error) * kd);
   last_error = err;
 
   int l_spd = spd + turn;
