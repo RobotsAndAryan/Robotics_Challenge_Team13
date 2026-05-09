@@ -3,15 +3,45 @@
 
 MotoronI2C mc;
 
-int spd = 200;
+int spd = 600;
+
+int enc1A = 3;
+int enc1B = 4;
+int enc2A = 11;
+int enc2B = 12;
+
+volatile long pos1 = 0;
+volatile long pos2 = 0;
+
+long last_pos1 = 0;
+long last_pos2 = 0;
+unsigned long last_time = 0;
+
+void tick1() {
+  if (digitalRead(enc1A) == digitalRead(enc1B)) pos1++;
+  else pos1--;
+}
+
+void tick2() {
+  if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++;
+  else pos2--;
+}
 
 void setup() {
   delay(2000);
   Serial.begin(115200);
   Wire1.begin();
 
+  pinMode(enc1A, INPUT_PULLUP);
+  pinMode(enc1B, INPUT_PULLUP);
+  pinMode(enc2A, INPUT_PULLUP);
+  pinMode(enc2B, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(enc1A), tick1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(enc2A), tick2, CHANGE);
+
   mc.setBus(&Wire1);
-  mc.setAddress(0x14);
+  mc.setAddress(0x10);
 
   mc.reinitialize();
   mc.clearResetFlag();
@@ -24,9 +54,6 @@ void setup() {
 
   mc.setPwmMode(1, 6);
   mc.setPwmMode(2, 6);
-
-  Serial.println("tank drive ready");
-  Serial.println("w=fwd, s=rev, a=left, d=right, x=stop");
 }
 
 void loop() {
@@ -36,27 +63,39 @@ void loop() {
     if (cmd == 'w') {
       mc.setSpeed(1, spd);
       mc.setSpeed(2, spd);
-      Serial.println("fwd");
     } 
     else if (cmd == 's') {
       mc.setSpeed(1, -spd);
       mc.setSpeed(2, -spd);
-      Serial.println("rev");
     }
     else if (cmd == 'a') {
       mc.setSpeed(1, -spd);
       mc.setSpeed(2, spd);
-      Serial.println("left");
     }
     else if (cmd == 'd') {
       mc.setSpeed(1, spd);
       mc.setSpeed(2, -spd);
-      Serial.println("right");
     }
     else if (cmd == 'x') {
-      mc.setSpeed(1, 0);
-      mc.setSpeed(2, 0);
-      Serial.println("stop");
+      mc.setSpeed(1, 4);
+      mc.setSpeed(2, 4);
     }
+  }
+
+  if (millis() - last_time >= 100) {
+    long p1 = pos1;
+    long p2 = pos2;
+    
+    float v1 = (p1 - last_pos1) / 0.1; 
+    float v2 = (p2 - last_pos2) / 0.1;
+    
+    last_pos1 = p1;
+    last_pos2 = p2;
+    last_time = millis();
+
+    Serial.print("L_ticks/sec:");
+    Serial.print(v1);
+    Serial.print(" R_ticks/sec:");
+    Serial.println(v2);
   }
 }
