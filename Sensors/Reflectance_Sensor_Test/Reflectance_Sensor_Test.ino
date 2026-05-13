@@ -1,5 +1,5 @@
 const uint8_t SensorCount = 9;
-const uint8_t sensorPins[] = {2, 3, 4, 5, 6, 7, 8, 9, 10};
+const uint8_t sensorPins[] = {22, 23, 24, 25, 26, 27, 28, 29, 30};
 
 // Define both control pins
 const uint8_t emitterPinOdd = 11;  

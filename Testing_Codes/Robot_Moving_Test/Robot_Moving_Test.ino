@@ -1,101 +1,44 @@
 #include <Wire.h>
-#include <Motoron.h>
+#include <TFLI2C.h>
 
-MotoronI2C mc;
+TFLI2C tfl;
 
-int spd = 600;
-
-int enc1A = 3;
-int enc1B = 4;
-int enc2A = 11;
-int enc2B = 12;
-
-volatile long pos1 = 0;
-volatile long pos2 = 0;
-
-long last_pos1 = 0;
-long last_pos2 = 0;
-unsigned long last_time = 0;
-
-void tick1() {
-  if (digitalRead(enc1A) == digitalRead(enc1B)) pos1++;
-  else pos1--;
-}
-
-void tick2() {
-  if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++;
-  else pos2--;
-}
+int old_addr = 0x10; 
+int new_addr = 0x12; 
 
 void setup() {
-  delay(2000);
   Serial.begin(115200);
-  Wire1.begin();
-
-  pinMode(enc1A, INPUT_PULLUP);
-  pinMode(enc1B, INPUT_PULLUP);
-  pinMode(enc2A, INPUT_PULLUP);
-  pinMode(enc2B, INPUT_PULLUP);
-
-  attachInterrupt(digitalPinToInterrupt(enc1A), tick1, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(enc2A), tick2, CHANGE);
-
-  mc.setBus(&Wire1);
-  mc.setAddress(0x10);
-
-  mc.reinitialize();
-  mc.clearResetFlag();
-  mc.disableCommandTimeout();
-
-  mc.setMaxDeceleration(1, 400);
-  mc.setMaxDeceleration(2, 400);
-  mc.setMaxAcceleration(1, 400);
-  mc.setMaxAcceleration(2, 400);
-
-  mc.setPwmMode(1, 6);
-  mc.setPwmMode(2, 6);
+  Wire.begin();
+  delay(3000);
+  
+  Serial.println("changing tf-luna address...");
+  
+  Wire.beginTransmission(old_addr);
+  if (Wire.endTransmission() != 0) {
+    Serial.println("nothing at 0x10. check your pin 5 to ground.");
+    while(1); 
+  }
+  
+  if(tfl.Set_I2C_Addr(new_addr, old_addr)) {
+     Serial.println("ram updated to 0x12");
+  } else {
+     Serial.println("failed to change address");
+     tfl.printStatus();
+  }
+  
+  delay(500);
+  
+  if(tfl.Save_Settings(new_addr)) {
+     Serial.println("saved to eeprom permanently");
+  } else {
+     Serial.println("failed to save");
+     tfl.printStatus();
+  }
+  
+  delay(1000);
+  tfl.Soft_Reset(new_addr);
+  Serial.println("sensor rebooting... address is now 0x12");
 }
 
 void loop() {
-  if (Serial.available() > 0) {
-    char cmd = Serial.read();
-    
-    if (cmd == 'w') {
-      mc.setSpeed(1, spd);
-      mc.setSpeed(2, spd);
-    } 
-    else if (cmd == 's') {
-      mc.setSpeed(1, -spd);
-      mc.setSpeed(2, -spd);
-    }
-    else if (cmd == 'a') {
-      mc.setSpeed(1, -spd);
-      mc.setSpeed(2, spd);
-    }
-    else if (cmd == 'd') {
-      mc.setSpeed(1, spd);
-      mc.setSpeed(2, -spd);
-    }
-    else if (cmd == 'x') {
-      mc.setSpeed(1, 4);
-      mc.setSpeed(2, 4);
-    }
-  }
-
-  if (millis() - last_time >= 100) {
-    long p1 = pos1;
-    long p2 = pos2;
-    
-    float v1 = (p1 - last_pos1) / 0.1; 
-    float v2 = (p2 - last_pos2) / 0.1;
-    
-    last_pos1 = p1;
-    last_pos2 = p2;
-    last_time = millis();
-
-    Serial.print("L_ticks/sec:");
-    Serial.print(v1);
-    Serial.print(" R_ticks/sec:");
-    Serial.println(v2);
-  }
 }
