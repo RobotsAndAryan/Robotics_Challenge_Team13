@@ -18,6 +18,7 @@
 #include <WiFiUdp.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
+#include <MFRC522_I2C.h>
 
 char ssid[] = "PhaseSpaceNetwork_2.4G";
 char pass[] = "8igMacNet";
@@ -26,7 +27,9 @@ MotoronI2C mc;
 Adafruit_MPU6050 imu;
 WiFiUDP udp;
 
-int buttonPin = 5;
+MFRC522_I2C mfrc522(0x28, -1, &Wire1); 
+
+int killBtn = 31; 
 int ledPin = 6;
 
 int linePins[] = {22, 23, 24, 25, 26, 27, 28, 29, 30};
@@ -43,13 +46,15 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(killBtn, INPUT_PULLUP);
   pinMode(ledPin, OUTPUT);
   for(int i=0; i<9; i++) pinMode(linePins[i], INPUT);
 
   Wire.begin();
   Wire1.begin();
   Wire2.begin();
+
+  mfrc522.PCD_Init();
 
   mc.setBus(&Wire1);
   mc.setAddress(0x10);
@@ -64,7 +69,7 @@ void setup() {
   mc.setPwmMode(2, 6);
 
   if (!imu.begin(0x68, &Wire)) {
-    Serial.println("imu fail");
+    Serial.println("imu dead");
   }
 
   WiFi.begin(ssid, pass);
@@ -75,8 +80,9 @@ void setup() {
   }
   udp.begin(8888); 
   
-  Serial.println("ready. 1=fwd slow, 2=fwd fast, 3=L90, 4=R90, 5=U-Turn");
-  Serial.println("l=lines, d=distance, r=rfid");
+  Serial.println("grading demo ready");
+  Serial.println("1=fwd slow, 2=fwd fast, 3=L90, 4=R90, 5=U-Turn");
+  Serial.println("l=lines, d=distance, r=rfid scan");
   lastImuTime = millis();
 }
 
@@ -108,12 +114,12 @@ int getLidar(TwoWire &w, int addr) {
   return -1;
 }
 
-void doTurn(int targetAngle, int spd) {
+void doTurn(float targetAngle, int lSpd, int rSpd) {
   yaw = 0;
   while(abs(yaw) < targetAngle) {
     updateIMU();
-    mc.setSpeed(1, -spd);
-    mc.setSpeed(2, spd);
+    mc.setSpeed(1, lSpd);
+    mc.setSpeed(2, rSpd);
   }
   mc.setSpeed(1, 0);
   mc.setSpeed(2, 0);
@@ -123,12 +129,15 @@ void doTurn(int targetAngle, int spd) {
 void loop() {
   updateIMU();
 
-  int btn = digitalRead(buttonPin);
+  int btn = digitalRead(killBtn);
   if(btn == LOW && lastBtn == HIGH) {
     isStopped = !isStopped;
     if(isStopped) {
       mc.setSpeed(1, 0);
       mc.setSpeed(2, 0);
+      Serial.println("manual kill active");
+    } else {
+      Serial.println("robot live");
     }
     delay(200); 
   }
@@ -143,7 +152,7 @@ void loop() {
       isStopped = true;
       mc.setSpeed(1, 0);
       mc.setSpeed(2, 0);
-      Serial.println("UDP STOP HIT");
+      Serial.println("wifi kill active");
     }
   }
 
@@ -166,13 +175,13 @@ void loop() {
       Serial.println("fwd slow");
     }
     else if(c == '2') {
-      mc.setSpeed(1, 400);
-      mc.setSpeed(2, 400);
+      mc.setSpeed(1, 600);
+      mc.setSpeed(2, 600);
       Serial.println("fwd fast");
     }
-    else if(c == '3') doTurn(90, 600); 
-    else if(c == '4') doTurn(90, -600); 
-    else if(c == '5') doTurn(180, 600);
+    else if(c == '3') doTurn(90, -400, 400); 
+    else if(c == '4') doTurn(90, 400, -400); 
+    else if(c == '5') doTurn(180, 400, -400);
     else if(c == 'x') {
       mc.setSpeed(1, 0);
       mc.setSpeed(2, 0);
@@ -188,16 +197,28 @@ void loop() {
     else if(c == 'd') {
       int rDist = getLidar(Wire, 0x13);
       int lDist = getLidar(Wire1, 0x12);
-      Serial.print("Lidar L: "); Serial.print(lDist);
-      Serial.print(" R: "); Serial.println(rDist);
+      Serial.print("Lidar L(0x12): "); Serial.print(lDist);
+      Serial.print(" R(0x13): "); Serial.println(rDist);
     }
     else if(c == 'r') {
-      Wire1.beginTransmission(0x28); 
-      if(Wire1.endTransmission() == 0) {
-        Serial.println("RFID Tag ID: 4A B9 2C 11 (Simulated Data/Hardware Detected)");
-      } else {
-        Serial.println("RFID Not Found");
+      Serial.println("hold tag near reader...");
+      unsigned long st = millis();
+      bool found = false;
+      while(millis() - st < 5000) {
+        if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+          Serial.print("UID: ");
+          for (byte i = 0; i < mfrc522.uid.size; i++) {
+            if(mfrc522.uid.uidByte[i] < 0x10) Serial.print("0");
+            Serial.print(mfrc522.uid.uidByte[i], HEX);
+            Serial.print(" ");
+          }
+          Serial.println();
+          mfrc522.PICC_HaltA();
+          found = true;
+          break;
+        }
       }
+      if(!found) Serial.println("no tag seen");
     }
   }
 }
