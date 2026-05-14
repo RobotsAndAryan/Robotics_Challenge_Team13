@@ -1,38 +1,45 @@
 /*Wiring Architecture : 
- Reflectance (Line-Following) : D22-D30(Arrays), D10-11(Control pins) , 3V3!! GND
- RFID (Tag Scanning): SDA1 SCL1,5V GND
- 2 * TF-Luna Lidar (Side Wall detection)(!! Need to change one's address):  one on each, 5V GND, IIC(port 5 for I2C mode):GND
- Motoron M3S550 : Just stack it on
- 2 * n20 micro metal gearmotor : (power to shield) , 5V GND (encoder power), D3,4 and D12,13(Encoder Phase)(2 pins for each motor)
- 64 ToF Imager (Front distance imager) : 3V3!! GND, SDA2 SCL2
- MPU6050 IMU (Turning error fixing using its Yaw data) :  5V GND, SDA2 SCL2
-
- Revival Mechanism : D5,6(Button and LED), 5V GND
- Seed Planting Servo : D7 , 5V GND
- Kill Switch : D31
+ Reflectance : D22-D30, 3V3 GND
+ RFID: SDA(20) SCL(21) [Wire], 5V GND
+ Left Lidar (0x12): SDA(20) SCL(21) [Wire], 5V GND, Pin 5 to GND
+ Right Lidar (0x13): SDA1 SCL1 [Wire1], 5V GND, Pin 5 to GND
+ IMU (0x68): SDA1 SCL1 [Wire1], 5V GND
+ Motoron (0x10): SDA1 SCL1 [Wire1] stacked
+ 64 ToF Imager: SDA2 SCL2 [Wire2], 3V3 GND
+ Motors: VMOT to battery. Encoders to D3, D4 (Left) and D12, D13 (Right), 5V GND
+ Buttons: D2 (Kill), D36 (Spare)
+ RGB LED: D35 (Red), D33 (Green)
+ Servo: D32, 5V GND (FROM BATTERY NOT ARDUINO)
 */
 
 #include <Wire.h>
 #include <Motoron.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <MFRC522_I2C.h>
-
-char ssid[] = "PhaseSpaceNetwork_2.4G";
-char pass[] = "8igMacNet";
+#include <Servo.h>
 
 MotoronI2C mc;
 Adafruit_MPU6050 imu;
-WiFiUDP udp;
+MFRC522_I2C mfrc522(0x28, -1, &Wire); 
+Servo myServo;
 
-MFRC522_I2C mfrc522(0x28, -1, &Wire1); 
+int killBtn = 2; 
+int spareBtn = 36;
+int ledRed = 35;
+int ledGreen = 33;
+int servoPin = 32;
 
-int killBtn = 31; 
-int ledPin = 6;
+int enc1A = 3; int enc1B = 4;
+int enc2A = 12; int enc2B = 13;
 
 int linePins[] = {22, 23, 24, 25, 26, 27, 28, 29, 30};
+
+volatile long pos1 = 0;
+volatile long pos2 = 0;
+
+int servoPos[] = {0, 45, 90, 135, 180};
+int currentServoIdx = 0;
 
 bool isStopped = true;
 unsigned long lastBlink = 0;
@@ -40,19 +47,43 @@ bool ledState = false;
 
 float yaw = 0;
 unsigned long lastImuTime = 0;
-int lastBtn = HIGH;
+int lastBtn = LOW;
+
+void tick1() {
+  if (digitalRead(enc1A) == digitalRead(enc1B)) pos1++;
+  else pos1--;
+}
+
+void tick2() {
+  if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++;
+  else pos2--;
+}
 
 void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  pinMode(killBtn, INPUT_PULLUP);
-  pinMode(ledPin, OUTPUT);
+  pinMode(killBtn, INPUT);
+  pinMode(spareBtn, INPUT);
+  pinMode(ledRed, OUTPUT);
+  pinMode(ledGreen, OUTPUT);
+  
+  pinMode(enc1A, INPUT_PULLUP);
+  pinMode(enc1B, INPUT_PULLUP);
+  pinMode(enc2A, INPUT_PULLUP);
+  pinMode(enc2B, INPUT_PULLUP);
+  
+  attachInterrupt(digitalPinToInterrupt(enc1A), tick1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(enc2A), tick2, CHANGE);
+
   for(int i=0; i<9; i++) pinMode(linePins[i], INPUT);
 
-  Wire.begin();
-  Wire1.begin();
-  Wire2.begin();
+  myServo.attach(servoPin);
+  myServo.write(0);
+
+  Wire.begin();   // I2C0
+  Wire1.begin();  // I2C1
+  Wire2.begin();  // I2C2
 
   mfrc522.PCD_Init();
 
@@ -68,21 +99,13 @@ void setup() {
   mc.setPwmMode(1, 6);
   mc.setPwmMode(2, 6);
 
-  if (!imu.begin(0x68, &Wire)) {
-    Serial.println("imu dead");
+  if (!imu.begin(0x68, &Wire1)) {
+    Serial.println("imu dead on wire1");
   }
 
-  WiFi.begin(ssid, pass);
-  int tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 10) {
-    delay(500);
-    tries++;
-  }
-  udp.begin(8888); 
-  
   Serial.println("grading demo ready");
   Serial.println("1=fwd slow, 2=fwd fast, 3=L90, 4=R90, 5=U-Turn");
-  Serial.println("l=lines, d=distance, r=rfid scan");
+  Serial.println("l=lines, d=lidars, r=rfid, e=encoders, p=servo");
   lastImuTime = millis();
 }
 
@@ -130,7 +153,7 @@ void loop() {
   updateIMU();
 
   int btn = digitalRead(killBtn);
-  if(btn == LOW && lastBtn == HIGH) {
+  if(btn == HIGH && lastBtn == LOW) {
     isStopped = !isStopped;
     if(isStopped) {
       mc.setSpeed(1, 0);
@@ -143,27 +166,16 @@ void loop() {
   }
   lastBtn = btn;
 
-  int pk = udp.parsePacket();
-  if(pk) {
-    char buf[50];
-    int len = udp.read(buf, 50);
-    buf[len] = 0;
-    if(String(buf).indexOf("Stop") >= 0) {
-      isStopped = true;
-      mc.setSpeed(1, 0);
-      mc.setSpeed(2, 0);
-      Serial.println("wifi kill active");
-    }
-  }
-
   if(isStopped) {
+    digitalWrite(ledGreen, LOW);
     if(millis() - lastBlink > 250) {
       ledState = !ledState;
-      digitalWrite(ledPin, ledState);
+      digitalWrite(ledRed, ledState);
       lastBlink = millis();
     }
   } else {
-    digitalWrite(ledPin, LOW); 
+    digitalWrite(ledRed, LOW); 
+    digitalWrite(ledGreen, HIGH);
   }
 
   if(!isStopped && Serial.available() > 0) {
@@ -186,6 +198,16 @@ void loop() {
       mc.setSpeed(1, 0);
       mc.setSpeed(2, 0);
     }
+    else if(c == 'p') {
+      currentServoIdx = (currentServoIdx + 1) % 5;
+      myServo.write(servoPos[currentServoIdx]);
+      Serial.print("servo moved to: ");
+      Serial.println(servoPos[currentServoIdx]);
+    }
+    else if(c == 'e') {
+      Serial.print("enc1 (L): "); Serial.print(pos1);
+      Serial.print(" | enc2 (R): "); Serial.println(pos2);
+    }
     else if(c == 'l') {
       Serial.print("lines: ");
       for(int i=0; i<9; i++) {
@@ -195,8 +217,8 @@ void loop() {
       Serial.println();
     }
     else if(c == 'd') {
-      int rDist = getLidar(Wire, 0x13);
-      int lDist = getLidar(Wire1, 0x12);
+      int lDist = getLidar(Wire, 0x12);
+      int rDist = getLidar(Wire1, 0x13);
       Serial.print("Lidar L(0x12): "); Serial.print(lDist);
       Serial.print(" R(0x13): "); Serial.println(rDist);
     }
