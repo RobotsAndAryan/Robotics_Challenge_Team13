@@ -13,7 +13,7 @@ int enc2A = 39; int enc2B = 40;
 volatile long pos1 = 0; volatile long pos2 = 0;
 
 int emitterOdd = 37; int emitterEven = 38;
-int linePins[] = {30, 29, 28, 27, 26, 25, 24, 23, 22};
+int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
 float Kp = 10; 
@@ -23,7 +23,7 @@ float lastError = 0;
 unsigned long lastPrint = 0;
 
 bool pathBlocked = false;
-int obstacleThreshold = 150; 
+int obstacleThreshold = 200; 
 
 void tick1() {
   if (digitalRead(enc1A) == digitalRead(enc1B)) pos1++; else pos1--;
@@ -79,7 +79,8 @@ void setup() {
   if (!myToF.begin(0x29, Wire2)) {
     Serial.println("tof fail");
   } else { 
-    myToF.setResolution(8 * 8); 
+    myToF.setResolution(4 * 4); 
+    myToF.setRangingFrequency(60); 
     myToF.startRanging(); 
   }
   
@@ -91,14 +92,14 @@ void loop() {
     VL53L5CX_ResultsData data;
     myToF.getRangingData(&data);
     
-    bool detected = false;
-    for(int i = 24; i < 40; i++) {
+    int hits = 0;
+    for(int i = 4; i < 12; i++) {
       if(data.distance_mm[i] > 0 && data.distance_mm[i] < obstacleThreshold) {
-        detected = true;
-        break;
+        hits++;
       }
     }
-    pathBlocked = detected;
+    if(hits >= 2) pathBlocked = true;
+    else pathBlocked = false;
   }
 
   if (pathBlocked) {
@@ -149,8 +150,8 @@ void loop() {
     sensors_event_t a, g, t;
     imu.getEvent(&a, &g, &t);
     
-    Serial.print("STATE: "); Serial.print(pathBlocked ? "BLOCKED" : "TRACKING");
-    Serial.print(" | L:"); Serial.print(distL);
+    Serial.print("STAT:"); Serial.print(pathBlocked ? "BLOCK" : "TRACK");
+    Serial.print(" L:"); Serial.print(distL);
     Serial.print(" R:"); Serial.print(distR);
     Serial.print(" GZ:"); Serial.print(g.gyro.z);
     Serial.print(" E1:"); Serial.print(pos1);
