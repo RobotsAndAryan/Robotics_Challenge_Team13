@@ -17,7 +17,7 @@ volatile long pos2 = 0;
 
 int emitterOdd = 37;
 int emitterEven = 38;
-int linePins[] = {22, 23, 24, 25, 26, 27, 28, 29, 30};
+int linePins[] = {30,29,28,27,26,25,24,23,22};
 
 unsigned long lastPrint = 0;
 
