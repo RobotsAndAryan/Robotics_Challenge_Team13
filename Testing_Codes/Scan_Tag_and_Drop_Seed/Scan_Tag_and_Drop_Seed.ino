@@ -10,24 +10,24 @@ MotoronI2C mc;
 Adafruit_MPU6050 imu;
 SparkFun_VL53L5CX myToF;
 MFRC522_I2C mfrc522(0x28, -1, &Wire); 
-Servo seedServo;
+Servo seedServo;                      
 
 int enc1A = 44; int enc1B = 45;
 int enc2A = 39; int enc2B = 40;
 volatile long pos1 = 0; volatile long pos2 = 0;
 
 int emitterOdd = 37; int emitterEven = 38;
-int linePins[] = {30, 29, 28, 27, 26, 25, 24, 23, 22};
+int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
 float Kp = 10; 
 float Kd = 5.0; 
-int baseSpeed = 330; 
+int baseSpeed = 500; 
 float lastError = 0;
-int turning_spd = 500; // Adjusted for 10.9V
+int turning_spd = 600; // Adjusted for 10.9V
 
 bool pathBlocked = false;
-int obstacleThreshold = 200; 
+int obstacleThreshold = 300; 
 int lostLineCount = 0;
 float z_bias = 0.0;
 
@@ -115,7 +115,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(enc1A), tick1, CHANGE);
   attachInterrupt(digitalPinToInterrupt(enc2A), tick2, CHANGE);
 
-  seedServo.attach(32);
+  seedServo.attach(46);
   seedServo.write(0);
 
   mc.setBus(&Wire1); mc.setAddress(0x10);
@@ -150,11 +150,13 @@ void setup() {
 
 void loop() {
   // PRIORITY 1: FRONT COLLISION OVERRIDE
+
+  
   if (myToF.isDataReady()) {
     VL53L5CX_ResultsData data;
     myToF.getRangingData(&data);
     int hits = 0;
-    for(int i = 4; i < 12; i++) {
+    for(int i = 1; i < 8; i++) {
       if(data.distance_mm[i] > 0 && data.distance_mm[i] < obstacleThreshold) hits++;
     }
     pathBlocked = (hits >= 2);
@@ -167,19 +169,21 @@ void loop() {
 
   // PRIORITY 2: TASK EXECUTION (RFID)
   if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+    Serial.println("Tag Detected");
     setMotors(0, 0); // Halt for stability
-    delay(200);
+    delay(2000);
     
     // Drive predefined distance (TUNE THIS TICK VALUE TO YOUR DESIRED CM)
-    moveForwardTicks(150); 
+    moveForwardTicks(650); 
     
-    // Actuate seed drop mechanism
+    mfrc522.PICC_HaltA(); // Acknowledge tag so it doesn't double-fire
+
+    // Actuate seed drop mechanism --  tbc
     seedServo.write(90);
     delay(500);
     seedServo.write(0);
-    delay(500);
-    
-    mfrc522.PICC_HaltA(); // Acknowledge tag so it doesn't double-fire
+    delay(2000);
+
     lastError = 0; // Reset tracking history
     return;
   }

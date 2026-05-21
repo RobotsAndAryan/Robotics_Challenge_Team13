@@ -17,7 +17,7 @@ int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
 float Kp = 10; 
-float Kd = 5.0; 
+float Kd = 7.50; 
 int baseSpeed = 330; 
 float lastError = 0;
 unsigned long lastPrint = 0;
