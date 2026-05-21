@@ -20,7 +20,7 @@ int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40};
 
 float Kp = 1.5; 
 float Kd = 5.0; 
-int baseSpeed = 250;
+int baseSpeed = 600;
 float lastError = 0;
 int turning_spd = 700;
 

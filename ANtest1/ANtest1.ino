@@ -1,11 +1,14 @@
 #include <MiniMessenger.h>
 #include "secrets.h"
+#include <Wire.h>
+#include <Motoron.h>
 
+MotoronI2C mc;
 MiniMessenger messenger;
 
 const char* BoardId = "Kayubo";
-const int LED_PIN = 53;
-const int BUTTON_PIN = 49;
+const int LED_PIN = 4;
+const int BUTTON_PIN = 2;
 
 // Two independent enable sources
 bool physical_enable = true;   // toggled by button
@@ -67,11 +70,25 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   }
 }
 
+void move_forward(){
+  mc.setSpeed(1,660);
+  mc.setSpeed(3,660);
+}
+
+void stop(){
+  mc.setSpeed(1,0);
+  mc.setSpeed(3,0);
+}
 
 // Setup
 
 void setup() {
   Serial.begin(115200);
+  Wire1.begin();
+
+  mc.setBus(&Wire1); mc.setAddress(0x10);
+  mc.reinitialize(); mc.clearResetFlag(); mc.disableCommandTimeout();
+  mc.setPwmMode(1, 6); mc.setPwmMode(3, 6);
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
@@ -109,7 +126,9 @@ void loop() {
 
   if (robotEnabled()) {
     digitalWrite(LED_PIN, HIGH);
+    move_forward();
   } else {
+    stop();
     if (millis() - lastBlink >= 500) {
       lastBlink = millis();
       ledOn = !ledOn;
