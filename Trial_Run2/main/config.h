@@ -7,6 +7,20 @@
 #include <Servo.h>
 #include <MiniMessenger.h>
 
+enum RobotState {
+  STATE_BASE_NAV,
+  STATE_AIRLOCK_WAIT,
+  STATE_RAMP_CLIMB,
+  STATE_ARENA_NAV,
+  STATE_WAIT_SERVER,
+  STATE_PLANT_SEED,
+  STATE_DEAD_RECKONING,
+  STATE_REVIVE_TARGET
+};
+
+// Change this to test different phases instantly
+#define START_STATE STATE_BASE_NAV
+
 extern MotoronI2C mc;
 extern Adafruit_MPU6050 imu;
 extern SparkFun_VL53L5CX myToF;
@@ -17,6 +31,8 @@ extern MiniMessenger messenger;
 extern const char* BoardId;
 extern const int LED_PIN;
 extern const int BUTTON_PIN;
+extern const int GREEN_LED_PIN;
+extern const int REVIVAL_BUTTON_PIN;
 
 extern bool physical_enable;   
 extern bool wifi_enable;      
@@ -31,9 +47,10 @@ extern int linePins[9];
 extern int weights[9]; 
 
 extern float Kp_line; extern float Kd_line; 
-extern float Kp_wall; 
-extern int baseSpeed_6V; 
-extern int baseSpeed_7V; 
+extern float Kp_wall; extern float wall_target;
+extern float Kp_heading; // New constant for Dead Reckoning
+extern int baseSpeed_6V; extern int baseSpeed_7V; 
+extern int turning_spd;
 extern float lastError;
 extern int obstacleThreshold; 
 extern int lostLineCount;

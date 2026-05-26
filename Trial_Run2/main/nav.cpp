@@ -37,19 +37,20 @@ bool executeLineFollow(int bSpeed, int maxPWM) {
   return true;
 }
 
-void executeWallFollow(int bSpeed, int maxPWM) {
+bool executeWallFollow(int bSpeed, int maxPWM) {
   int distL = getLidar(Wire, 0x10);
   int distR = getLidar(Wire1, 0x12);
   if(distL < 0) distL = 999;
   if(distR < 0) distR = 999;
 
-  if (distL < 250) {
-    float wallError = 100.0 - distL; 
+  if (distL < 350) {
+    float wallError = wall_target - distL; 
     setMotors(bSpeed - (Kp_wall * wallError), bSpeed + (Kp_wall * wallError), maxPWM);
-  } else if (distR < 250) {
-    float wallError = 100.0 - distR; 
+    return true;
+  } else if (distR < 350) {
+    float wallError = wall_target - distR; 
     setMotors(bSpeed + (Kp_wall * wallError), bSpeed - (Kp_wall * wallError), maxPWM);
-  } else {
-    setMotors(bSpeed, bSpeed, maxPWM);
+    return true;
   }
+  return false;
 }

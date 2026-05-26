@@ -3,3 +3,4 @@
 int getLidar(TwoWire &w, int addr);
 void checkFrontObstacle();
 float getPitch();
+int getFrontClearanceMM();

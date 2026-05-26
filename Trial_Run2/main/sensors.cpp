@@ -27,6 +27,23 @@ void checkFrontObstacle() {
   }
 }
 
+// NEW: For Revival Task deceleration 
+int getFrontClearanceMM() {
+  if (myToF.isDataReady()) {
+    VL53L5CX_ResultsData data;
+    myToF.getRangingData(&data);
+    int sum = 0; int valid = 0;
+    for(int i = 4; i < 12; i++) {
+      if(data.distance_mm[i] > 0) {
+        sum += data.distance_mm[i];
+        valid++;
+      }
+    }
+    if (valid > 0) return sum / valid;
+  }
+  return 9999;
+}
+
 float getPitch() {
   sensors_event_t a, g, t;
   imu.getEvent(&a, &g, &t);
