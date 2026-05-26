@@ -173,7 +173,8 @@ void loop() {
       break;
 
     case STATE_RAMP_CLIMB:
-      executeWallFollow(baseSpeed_7V, 514); 
+      moveStraightDeadReckoning(1200);
+      executeWallFollow(baseSpeed_7V, 514,1); //mode 1 for ramp(just left)
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
         else if (millis() - flatGroundTime > 2000) {
@@ -190,7 +191,7 @@ void loop() {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
           // 2. Line is lost. Try Wall Following.
-          if(!executeWallFollow(baseSpeed_6V, 440)) {
+          if(!executeWallFollow(baseSpeed_6V, 440,2)) { // mode 2 for arena (so its based on where it is)
             // 3. No Line, No Walls. Execute Open-Field Dead Reckoning across gap.
             Serial.println("No Line, No Walls -> Executing Dead Reckoning");
             moveStraightDeadReckoning(800); // Drives straight for ~800 ticks, adjusting heading
