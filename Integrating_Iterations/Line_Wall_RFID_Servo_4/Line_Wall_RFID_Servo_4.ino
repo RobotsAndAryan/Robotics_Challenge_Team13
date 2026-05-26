@@ -29,7 +29,7 @@ int turning_spd = 660;
 
 bool pathBlocked = false;
 int obstacleThreshold = 200; // Dropped to 20cm to avoid reading the floor
-float wall_target = 13.0;
+float wall_target = 130.0;
 int lostLineCount = 0;
 float z_bias = 0.0;
 
