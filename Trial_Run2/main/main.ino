@@ -33,7 +33,7 @@ float Kp_line = 5.0; float Kd_line = 2.5;
 float Kp_wall = 5.0; float wall_target = 130.0;
 float Kp_heading = 6.0; // Tuning constant for straight line gyro
 int baseSpeed_6V = 400; int baseSpeed_7V = 400; 
-int turning_spd = 660;
+int turning_spd = 550;
 float lastError = 0;
 int obstacleThreshold = 200; 
 int lostLineCount = 0;
@@ -129,7 +129,7 @@ void loop() {
 
   if (physical_enable) {
     static unsigned long lastReg = 0;
-    if (millis() - lastReg > 10000) {
+    if (millis() - lastReg > 5000) {
       char reg[64]; snprintf(reg, sizeof(reg), "type=register team_id=%s board_id=%s", GROUP_ID, BoardId);
       messenger.sendToBoard("server", reg);
       lastReg = millis();
@@ -236,7 +236,7 @@ void loop() {
       }
       break;
 
-    case STATE_REVIVE_TARGET:
+    case STATE_REVIVE_TARGET:{
       // Task 8: Touch-Based Revival
       int clearance = getFrontClearanceMM();
       
@@ -266,9 +266,10 @@ void loop() {
         currentState = STATE_ARENA_NAV;
       }
       break;
-
+    }
     // Placeholder states left intact to avoid compile errors if you switch tags back
     case STATE_WAIT_SERVER:
+
     case STATE_PLANT_SEED:
     case STATE_DEAD_RECKONING: // Directly called as a function now, state kept for architecture
       break;
