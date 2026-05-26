@@ -8,8 +8,7 @@
 #include <Servo.h>
 
 Servo myServo;  // Create servo object
-const int servoPin = 9;  // Pin connected to servo signal wire
-v
+const int servoPin = 5;  // Pin connected to servo signal wire
 // Array of positions in 45-degree increments
 const int positions[] = {0, 45, 90, 135, 180};
 const int numPositions = 5;

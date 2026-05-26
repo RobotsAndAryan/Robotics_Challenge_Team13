@@ -225,6 +225,7 @@ void loop() {
       lastRegister = millis();
       char reg[64];
       snprintf(reg, sizeof(reg), "type=register team_id=%s board_id=%s", GROUP_ID, BoardId);
+      Serial.println("Registration Sent");
       messenger.sendToBoard("server", reg);
     }
   }

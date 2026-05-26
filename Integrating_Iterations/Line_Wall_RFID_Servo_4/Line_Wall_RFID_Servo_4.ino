@@ -20,15 +20,16 @@ int emitterOdd = 37; int emitterEven = 38;
 int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
-float Kp_line = 10; 
-float Kd_line = 5.0; 
-float Kp_wall = 2.5; // Tunable constant for wall following
-int baseSpeed = 500; 
+float Kp_line = 5; 
+float Kd_line = 2.5; 
+float Kp_wall = 5; // Tunable constant for wall following
+int baseSpeed = 400; 
 float lastError = 0;
-int turning_spd = 600; 
+int turning_spd = 660; 
 
 bool pathBlocked = false;
 int obstacleThreshold = 200; // Dropped to 20cm to avoid reading the floor
+float wall_target = 13.0;
 int lostLineCount = 0;
 float z_bias = 0.0;
 
@@ -116,7 +117,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(enc1A), tick1, CHANGE);
   attachInterrupt(digitalPinToInterrupt(enc2A), tick2, CHANGE);
 
-  seedServo.attach(46);
+  seedServo.attach(5);
   seedServo.write(currentServoAngle); // Initialize to 0
 
   mc.setBus(&Wire1); mc.setAddress(0x10);
@@ -164,21 +165,34 @@ void loop() {
 
   if (pathBlocked) {
     setMotors(0, 0);
+    int distL = getLidar(Wire, 0x10);
+    int distR = getLidar(Wire1, 0x12);
+    
+    if (distL > distR) turnAngle(90.0, true);
+    else turnAngle(90.0, false);
+    lostLineCount = 0;
     return; 
   }
 
   // --- PRIORITY 2: TASK EXECUTION (RFID) ---
   if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
-    Serial.println("Tag Detected");
+    Serial.print("Tag Detected:");
+        Serial.print("UID: ");
+    for (byte i = 0; i < mfrc522.uid.size; i++) {
+      if(mfrc522.uid.uidByte[i] < 0x10) Serial.print("0"); // Leading zero
+      Serial.print(mfrc522.uid.uidByte[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println("\n");
     setMotors(0, 0); 
     delay(1000);
     
-    moveForwardTicks(650); 
+    moveForwardTicks(700); 
     
     mfrc522.PICC_HaltA(); 
 
     // Actuate seed drop by incrementing exactly 45 degrees
-    currentServoAngle += 45;
+    currentServoAngle += 40;
     if(currentServoAngle > 180) currentServoAngle = 0; // Reset if it maxes out
     seedServo.write(currentServoAngle);
     delay(1000);
@@ -221,15 +235,15 @@ void loop() {
       if(distL < 0) distL = 999;
       if(distR < 0) distR = 999;
 
-      // If left wall is within 250mm, follow it (target 100mm distance)
-      if (distL < 250) {
-        float wallError = 100.0 - distL; 
+      // If left wall is within 250mm, follow it (target 130mm distance)
+      if (distL < 350) {
+        float wallError = wall_target - distL; 
         float correction = Kp_wall * wallError; 
         setMotors(baseSpeed - correction, baseSpeed + correction);
       } 
-      // If right wall is within 250mm, follow it (target 100mm distance)
-      else if (distR < 250) {
-        float wallError = 100.0 - distR; 
+      // If right wall is within 250mm, follow it (target 130mm distance)
+      else if (distR < 350) {
+        float wallError = wall_target - distR; 
         float correction = Kp_wall * wallError;
         setMotors(baseSpeed + correction, baseSpeed - correction);
       } 
