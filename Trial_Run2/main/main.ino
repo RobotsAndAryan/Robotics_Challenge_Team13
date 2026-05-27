@@ -29,13 +29,13 @@ int emitterOdd = 37; int emitterEven = 38;
 int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
-float Kp_line = 10.0; float Kd_line = 5.0; 
+float Kp_line = 20.0; float Kd_line = 5.0; 
 float Kp_wall = 5.0; float wall_target = 130.0;
 float Kp_heading = 6.0; 
-int baseSpeed_6V = 440; int baseSpeed_7V = 550; 
-int turning_spd = 550;
+int baseSpeed_6V = 350; int baseSpeed_7V = 550; 
+int turning_spd = 400;
 float lastError = 0;
-int obstacleThreshold = 200; 
+int obstacleThreshold = 100; 
 int lostLineCount = 0;
 int currentServoAngle = 0;
 float z_bias = 0.0;
@@ -281,9 +281,9 @@ void loop() {
     case STATE_OBSTACLE_AVOID: {
       // FIX: Execute Task 7 Geometric Bypass Maneuver
       turnAngle(90.0, true);           // 1. Turn Left
-      moveStraightDeadReckoning(800);  // 2. Drive outward to clear object width
+      moveStraightDeadReckoning(5000);  // 2. Drive outward to clear object width
       turnAngle(90.0, false);          // 3. Turn Right
-      moveStraightDeadReckoning(1200); // 4. Drive forward past the object length
+      moveStraightDeadReckoning(5000); // 4. Drive forward past the object length
       turnAngle(90.0, false);          // 5. Turn Right 
       
       // 6. Drive back towards the track until the line sensors see black
@@ -306,10 +306,10 @@ void loop() {
       int clearance = getFrontClearanceMM();
       
       if (clearance > 800) {
-        setMotors(440, 440, 500); 
+        setMotors(400, 400, 500); 
       } 
       else if (clearance > 35) {
-        int approachSpeed = map(clearance, 35, 800, 400, 514); 
+        int approachSpeed = map(clearance, 35, 800, 330, 440); 
         setMotors(approachSpeed, approachSpeed, 440);
       } 
       else {

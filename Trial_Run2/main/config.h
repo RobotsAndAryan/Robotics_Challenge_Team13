@@ -20,7 +20,7 @@ enum RobotState {
   STATE_REVIVE_TARGET
 };
 
-#define START_STATE STATE_BASE_NAV
+#define START_STATE STATE_REVIVE_TARGET
 
 extern MotoronI2C mc;
 extern Adafruit_MPU6050 imu;
