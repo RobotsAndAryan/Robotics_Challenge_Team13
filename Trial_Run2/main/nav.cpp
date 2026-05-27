@@ -97,6 +97,7 @@ bool isLineDetected() {
       if(lineVals[i] == 1000 && digitalRead(linePins[i]) == LOW) lineVals[i] = micros() - st;
     }
   }
+
   for(int i=0; i<9; i++) {
     if(lineVals[i] > 500) return true;
   }

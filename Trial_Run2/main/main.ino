@@ -46,7 +46,7 @@ RobotState lastLoggedState = (RobotState)-1;
 
 unsigned long missionStartTime = 0;
 bool missionActive = false;
-const unsigned long ABORT_TIME_MS = 300000; // 5 Minutes
+const unsigned long ABORT_TIME_MS = 300000; 
 
 int baseTagCount = 0;
 bool entryCleared = false;
@@ -72,7 +72,7 @@ float globalHeading = 0.0;
 int pitchUpCount = 0;
 int pitchDownCount = 0;
 
-char logBuf[128]; // Pre-allocated buffer for safe snprintf formatting
+char logBuf[128]; 
 
 const char* getStateName(RobotState state) {
   switch(state) {
@@ -97,9 +97,6 @@ const char* getStateName(RobotState state) {
   }
 }
 
-// -----------------------------------------------------------------
-// TELEMETRY BRIDGE: Broadcasts to both USB Serial and Wireless MQTT
-// -----------------------------------------------------------------
 void sysLog(const char* message) {
   Serial.println(message);
   if (wifi_enable) {
@@ -131,16 +128,16 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   if (strstr(msg, "type=heartbeat")) {
     if (strstr(msg, "enable=1") && !wifi_enable) {
       wifi_enable = true;
-      sysLog("[NET] Heartbeat: Robot ENABLED by Server");
+      sysLog("[NET] Robot ENABLED by Server");
     }
     else if (strstr(msg, "enable=0") && wifi_enable) {
       wifi_enable = false;
-      sysLog("[NET] Heartbeat: Robot DISABLED by Server");
+      sysLog("[NET] Robot DISABLED by Server");
     }
   }
   if (strstr(msg, "type=emergency") || strstr(msg, "type=disable")) {
     wifi_enable = false;
-    sysLog("[NET] EMERGENCY KILL SWITCH TRIGGERED");
+    sysLog("[NET] KILL SWITCH TRIGGERED");
   }
   
   if (currentState == STATE_BASE_NAV && strstr(msg, "entryReply") && strstr(msg, "accepted=true")) {
@@ -247,25 +244,21 @@ void setup() {
       sum += g.gyro.z; delay(5);
     }
     z_bias = sum / 200.0;
-    sysLog("[BOOT] IMU Calibration Complete.");
-  } else {
-    sysLog("[ERROR] IMU NOT FOUND ON WIRE1");
+    sysLog("[BOOT] IMU Calibrated.");
   }
   
   if (myToF.begin(0x29, Wire2)) { 
     myToF.setResolution(4 * 4); 
     myToF.setRangingFrequency(15); 
     myToF.startRanging(); 
-    sysLog("[BOOT] ToF Initialized");
-  } else {
-    sysLog("[ERROR] ToF NOT FOUND");
+    sysLog("[BOOT] ToF Init OK");
   }
   
   for(int i=0; i<81; i++) grid[i].known = false;
   randomSeed(analogRead(0));
   messenger.onMessage(onMessage);
   messenger.begin(WIFI_SSID, WIFI_PASSWORD, BROKER_HOST, BROKER_PORT, GROUP_ID, BoardId);
-  sysLog("[BOOT] Setup Complete. Waiting for Enable.");
+  sysLog("[BOOT] Waiting for switch.");
 }
 
 void checkGlobalAbort() {
@@ -273,7 +266,7 @@ void checkGlobalAbort() {
       currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE && 
       currentState != STATE_EXIT_WAIT_SERVER && currentState != STATE_AIRLOCK_WAIT_B &&
       currentState != STATE_AIRLOCK_B_DECLINE && currentState != STATE_DOCKED) {
-    sysLog("[MISSION] GLOBAL TIMEOUT TRIGGERED INSIDE LOOP. ABORTING.");
+    sysLog("[MISSION] 5 MIN TIMEOUT. ABORTING.");
     currentState = STATE_EXIT_SEQUENCE;
   }
 }
@@ -281,11 +274,10 @@ void checkGlobalAbort() {
 void loop() {
   updateUI();
 
-  // 1. The 5-Minute Timer Start Anchor
   if (robotEnabled() && !missionActive) {
     missionStartTime = millis();
     missionActive = true;
-    sysLog("[MISSION] 5-Minute Global Timer Engaged.");
+    sysLog("[MISSION] Timer Started.");
   }
 
   if (currentState != lastLoggedState) {
@@ -296,7 +288,6 @@ void loop() {
 
   if (!robotEnabled()) { stopMotors(); return; }
 
-  // 2. Global Abort Polling
   checkGlobalAbort();
 
   if (currentState != STATE_REVIVE_TARGET && currentState != STATE_OBSTACLE_AVOID && 
@@ -304,7 +295,7 @@ void loop() {
     checkFrontObstacle();
     if (pathBlocked) {
       stopMotors();
-      sysLog("[EVENT] Obstacle Detected - Engaging Bypass");
+      sysLog("[EVENT] Obstacle - Bypass");
       returnState = currentState; 
       currentState = STATE_OBSTACLE_AVOID;
       return;
@@ -318,7 +309,6 @@ void loop() {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 8) {
           stopMotors();
-          sysLog("[NAV] Line Lost. Intersection Sweep.");
           turnAngle(90.0, true);
           if(isLineDetected()) { lostLineCount=0; break; }
           
@@ -344,8 +334,6 @@ void loop() {
       if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial() && baseTagCount < 2) {
         stopMotors();
         baseTagCount++;
-        snprintf(logBuf, sizeof(logBuf), "[EVENT] Base Tag %d Scanned", baseTagCount);
-        sysLog(logBuf);
         mfrc522.PICC_HaltA();
         
         if(baseTagCount == 1) {
@@ -364,7 +352,6 @@ void loop() {
     case STATE_AIRLOCK_WAIT:
       stopMotors();
       if (airlockCleared) { 
-        sysLog("[NAV] Airlock Open. Pushing to ramp.");
         unsigned long time = millis();
         while(millis() - time < 10000) {
           executeLineFollow(baseSpeed_6V, 440);
@@ -379,9 +366,8 @@ void loop() {
       break;
 
     case STATE_RAMP_APPROACH:
-      if(!executeWallFollow(baseSpeed_6V, 440, 2)) {
-         setMotors(baseSpeed_6V, baseSpeed_6V, 440); 
-      }
+      setMotors(440, 440, 440); 
+      
       if (pitch < -10.0) {
         pitchUpCount++;
         if (pitchUpCount > 20) {
@@ -405,6 +391,16 @@ void loop() {
       } else flatGroundTime = 0;
       break;
 
+    case STATE_RAMP_DECLINE:
+      executeWallFollow(baseSpeed_6V, 440, 3); 
+      if (abs(pitch) < 5.0) {
+        if (flatGroundTime == 0) flatGroundTime = millis();
+        else if (millis() - flatGroundTime > 1500) {
+          currentState = STATE_ARENA_NAV;
+        }
+      } else flatGroundTime = 0;
+      break;
+
     case STATE_ARENA_NAV: {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
@@ -413,6 +409,7 @@ void loop() {
           if(r==0) { turnAngle(90.0, true); globalHeading += 90.0; }
           else if(r==1) { turnAngle(90.0, false); globalHeading -= 90.0; }
           else moveForwardTicks(400);
+          normalizeHeading();
           lostLineCount = 0;
         }
       } else lostLineCount = 0;
@@ -425,6 +422,14 @@ void loop() {
           strcat(currentTag, hex);
         }
         mfrc522.PICC_HaltA();
+
+        bool known = false;
+        for(int i=0; i<81; i++) {
+          if (grid[i].known && strcmp(grid[i].uid, currentTag) == 0) {
+            known = true;
+            break;
+          }
+        }
         
         char query[128]; snprintf(query, sizeof(query), "type=isFertile tag_id=%s board_id=%s", currentTag, BoardId);
         messenger.sendToBoard("server", query);
@@ -440,7 +445,7 @@ void loop() {
       stopMotors();
       if (!waitingForServer) currentState = isFertileZone ? STATE_PLANT_SEED : STATE_ARENA_NAV;
       else if (millis() - serverWaitStartTime > 5000) {
-        sysLog("[ERROR] Server Timeout. Abandoning Node.");
+        sysLog("[ERROR] Server Timeout");
         currentState = STATE_ARENA_NAV;
       }
       break;
@@ -464,14 +469,12 @@ void loop() {
     case STATE_EXIT_SEQUENCE: {
       if(currentX == 3 && currentY == 1) {
         stopMotors();
-        sysLog("[EXIT] Node (3,1) Achieved. Requesting Airlock B.");
         char query[64]; snprintf(query, sizeof(query), "type=openAirlockB board_id=%s", BoardId);
         messenger.sendToBoard("server", query);
         currentState = STATE_AIRLOCK_WAIT_B;
         break;
       }
 
-      // If we don't have GPS coordinates yet, drive forward to find the next grid node
       if(currentX == -1 || currentY == -1) {
         currentState = STATE_EXIT_DRIVE;
         break;
@@ -480,22 +483,20 @@ void loop() {
       normalizeHeading();
       float desiredHeading = globalHeading;
       
-      // Manhattan Routing Decisions
-      if(currentX > 3) desiredHeading = 90.0;       // Face West
-      else if(currentX < 3) desiredHeading = 270.0; // Face East
-      else if(currentY > 1) desiredHeading = 180.0; // Face South
-      else if(currentY < 1) desiredHeading = 0.0;   // Face North
+      if(currentX > 3) desiredHeading = 90.0;       
+      else if(currentX < 3) desiredHeading = 270.0; 
+      else if(currentY > 1) desiredHeading = 180.0; 
+      else if(currentY < 1) desiredHeading = 0.0;   
 
       float diff = desiredHeading - globalHeading;
       if(diff > 180.0) diff -= 360.0;
       if(diff < -180.0) diff += 360.0;
 
       if(abs(diff) > 10.0) {
-        snprintf(logBuf, sizeof(logBuf), "[EXIT] Routing. Turning %f degrees.", diff);
-        sysLog(logBuf);
         if(diff > 0) turnAngle(abs(diff), true);
         else turnAngle(abs(diff), false);
         globalHeading = desiredHeading;
+        normalizeHeading();
       }
 
       currentState = STATE_EXIT_DRIVE;
@@ -505,7 +506,7 @@ void loop() {
     case STATE_EXIT_DRIVE: {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
-          moveStraightDeadReckoning(400); // Push to center of intersection
+          moveStraightDeadReckoning(400); 
           lostLineCount = 0;
         }
       } else lostLineCount = 0;
@@ -538,7 +539,6 @@ void loop() {
     case STATE_AIRLOCK_WAIT_B:
       stopMotors();
       if (airlockBCleared) { 
-        sysLog("[NAV] Airlock B Open. Executing decline approach.");
         unsigned long time = millis();
         while(millis() - time < 8000) {
           executeLineFollow(baseSpeed_6V, 440);
@@ -551,7 +551,7 @@ void loop() {
       break;
 
     case STATE_AIRLOCK_B_DECLINE:
-      executeWallFollow(baseSpeed_6V, 440, 1);
+      executeWallFollow(baseSpeed_6V, 440, 3);
       if (pitch < -8.0) {
         flatGroundTime = 0;
       } else if (abs(pitch) < 5.0) {
@@ -564,9 +564,8 @@ void loop() {
 
     case STATE_DOCKED:
       stopMotors();
-      // Only log the victory once
       if (flatGroundTime != 9999) {
-        sysLog("[MISSION COMPLETE] Robot successfully docked in base.");
+        sysLog("[MISSION COMPLETE] Docked.");
         flatGroundTime = 9999; 
       }
       break;
@@ -578,7 +577,8 @@ void loop() {
       stopMotors();
 
       turnAngle(90.0, true);  
-      globalHeading += 90.0;         
+      globalHeading += 90.0;
+      normalizeHeading();         
       
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       unsigned long bypassStart = millis();
@@ -598,6 +598,7 @@ void loop() {
           stopMotors();
           turnAngle(90.0, true);
           globalHeading += 90.0;
+          normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           bypassStart = millis(); 
         }
@@ -612,6 +613,7 @@ void loop() {
         stopMotors();
         turnAngle(180.0, true);
         globalHeading += 180.0;
+        normalizeHeading();
         setMotors(baseSpeed_6V, baseSpeed_6V, 440);
         while (!isLineDetected()) {
           updateUI();
@@ -622,6 +624,7 @@ void loop() {
         stopMotors();
         turnAngle(90.0, true);
         globalHeading += 90.0;
+        normalizeHeading();
         pathBlocked = false;
         currentState = returnState;
         break;
@@ -632,7 +635,8 @@ void loop() {
       stopMotors();
 
       turnAngle(90.0, false);   
-      globalHeading -= 90.0;       
+      globalHeading -= 90.0;
+      normalizeHeading();       
 
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       bypassStart = millis();
@@ -652,6 +656,7 @@ void loop() {
           stopMotors();
           turnAngle(90.0, true);
           globalHeading += 90.0;
+          normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           bypassStart = millis();
         }
@@ -666,6 +671,7 @@ void loop() {
         stopMotors();
         turnAngle(180.0, true);
         globalHeading += 180.0;
+        normalizeHeading();
         setMotors(baseSpeed_6V, baseSpeed_6V, 440);
         while (!isLineDetected()) { 
           updateUI(); 
@@ -676,6 +682,7 @@ void loop() {
         stopMotors();
         turnAngle(90.0, true);
         globalHeading += 90.0;
+        normalizeHeading();
         pathBlocked = false;
         currentState = returnState;
         break;
@@ -686,7 +693,8 @@ void loop() {
       stopMotors();
 
       turnAngle(90.0, false);   
-      globalHeading -= 90.0;       
+      globalHeading -= 90.0;
+      normalizeHeading();       
       
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       while (!isLineDetected()) {
@@ -703,6 +711,7 @@ void loop() {
           stopMotors();
           turnAngle(90.0, true);
           globalHeading += 90.0;
+          normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
         }
         delay(5);
@@ -710,7 +719,8 @@ void loop() {
       stopMotors();
       
       turnAngle(90.0, true); 
-      globalHeading += 90.0;          
+      globalHeading += 90.0;
+      normalizeHeading();          
       pathBlocked = false;             
       currentState = returnState;      
       break;

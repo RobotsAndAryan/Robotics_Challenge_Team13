@@ -50,7 +50,6 @@ void turnAngle(float targetAngle, bool turnLeft) {
 void moveForwardTicks(long targetTicks) {
   pos1 = 0; pos2 = 0;
   setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-  // FIX: Using OR to prevent slip-induced infinite loops
   while(abs(pos1) < targetTicks || abs(pos2) < targetTicks) { 
     updateUI(); 
     if(!robotEnabled()) { stopMotors(); return; }
@@ -64,7 +63,7 @@ void moveStraightDeadReckoning(long targetTicks) {
   float currentYaw = 0;
   unsigned long lastIMUTime = micros();
   
-  while(abs(pos1) < targetTicks && abs(pos2) < targetTicks) {
+  while(abs(pos1) < targetTicks || abs(pos2) < targetTicks) {
     updateUI();
     if(!robotEnabled()) { stopMotors(); return; }
 
