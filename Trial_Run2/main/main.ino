@@ -247,17 +247,17 @@ void loop() {
       int clearance = getFrontClearanceMM();
       
       if (clearance > 800) {
-        setMotors(0, 0, 440); 
+        setMotors(440, 440, 500); 
       } 
-      else if (clearance > 80) {
-        int approachSpeed = map(clearance, 80, 800, 150, 400); 
+      else if (clearance > 35) {
+        int approachSpeed = map(clearance, 35, 800, 400, 514); 
         setMotors(approachSpeed, approachSpeed, 440);
       } 
       else {
         stopMotors();
         // FIX: Active polling delay replaces static delay(5000)
         unsigned long waitStart = millis();
-        while(millis() - waitStart < 5000) {
+        while(millis() - waitStart < 2000) {
           updateUI();
           if(!robotEnabled()) return;
           delay(10);
