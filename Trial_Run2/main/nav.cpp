@@ -85,7 +85,6 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
   return false;
 }
 
-// FIX: Scanner function for Task 7. Stops driving forward once the line is found.
 bool isLineDetected() {
   uint16_t lineVals[9];
   for(int i=0; i<9; i++) { pinMode(linePins[i], OUTPUT); digitalWrite(linePins[i], HIGH); }
@@ -98,7 +97,6 @@ bool isLineDetected() {
       if(lineVals[i] == 1000 && digitalRead(linePins[i]) == LOW) lineVals[i] = micros() - st;
     }
   }
-
   for(int i=0; i<9; i++) {
     if(lineVals[i] > 500) return true;
   }

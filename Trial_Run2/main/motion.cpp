@@ -50,7 +50,8 @@ void turnAngle(float targetAngle, bool turnLeft) {
 void moveForwardTicks(long targetTicks) {
   pos1 = 0; pos2 = 0;
   setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-  while(abs(pos1) < targetTicks && abs(pos2) < targetTicks) { 
+  // FIX: Using OR to prevent slip-induced infinite loops
+  while(abs(pos1) < targetTicks || abs(pos2) < targetTicks) { 
     updateUI(); 
     if(!robotEnabled()) { stopMotors(); return; }
     delay(1); 
