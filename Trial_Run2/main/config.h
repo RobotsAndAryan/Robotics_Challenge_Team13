@@ -21,7 +21,10 @@ enum RobotState {
   STATE_DEAD_RECKONING,
   STATE_EXIT_SEQUENCE,
   STATE_EXIT_DRIVE,
-  STATE_EXIT_WAIT_SERVER
+  STATE_EXIT_WAIT_SERVER,
+  STATE_AIRLOCK_WAIT_B,
+  STATE_AIRLOCK_B_DECLINE,
+  STATE_DOCKED
 };
 
 #define START_STATE STATE_BASE_NAV
@@ -68,3 +71,4 @@ void toggleEnableISR();
 bool robotEnabled();
 void updateUI();
 void normalizeHeading();
+void sysLog(const char* message);

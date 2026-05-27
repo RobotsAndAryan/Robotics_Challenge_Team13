@@ -17,7 +17,7 @@ const int BUTTON_PIN = 2;
 const int GREEN_LED_PIN = 3;
 const int REVIVAL_BUTTON_PIN = 46;
 
-volatile bool physical_enable = true;   
+volatile bool physical_enable = false;   
 bool wifi_enable = false;      
 bool pathBlocked = false;
 
@@ -46,11 +46,12 @@ RobotState lastLoggedState = (RobotState)-1;
 
 unsigned long missionStartTime = 0;
 bool missionActive = false;
-const unsigned long ABORT_TIME_MS = 210000; 
+const unsigned long ABORT_TIME_MS = 300000; // 5 Minutes
 
 int baseTagCount = 0;
 bool entryCleared = false;
 bool airlockCleared = false;
+bool airlockBCleared = false;
 bool waitingForServer = false;
 bool isFertileZone = false;
 unsigned long serverWaitStartTime = 0;
@@ -71,6 +72,8 @@ float globalHeading = 0.0;
 int pitchUpCount = 0;
 int pitchDownCount = 0;
 
+char logBuf[128]; // Pre-allocated buffer for safe snprintf formatting
+
 const char* getStateName(RobotState state) {
   switch(state) {
     case STATE_BASE_NAV: return "BASE_NAV";
@@ -87,7 +90,20 @@ const char* getStateName(RobotState state) {
     case STATE_EXIT_SEQUENCE: return "EXIT_SEQUENCE";
     case STATE_EXIT_DRIVE: return "EXIT_DRIVE";
     case STATE_EXIT_WAIT_SERVER: return "EXIT_WAIT_SERVER";
+    case STATE_AIRLOCK_WAIT_B: return "AIRLOCK_WAIT_B";
+    case STATE_AIRLOCK_B_DECLINE: return "AIRLOCK_B_DECLINE";
+    case STATE_DOCKED: return "DOCKED";
     default: return "UNKNOWN";
+  }
+}
+
+// -----------------------------------------------------------------
+// TELEMETRY BRIDGE: Broadcasts to both USB Serial and Wireless MQTT
+// -----------------------------------------------------------------
+void sysLog(const char* message) {
+  Serial.println(message);
+  if (wifi_enable) {
+    messenger.sendToBoard("debug_console", message);
   }
 }
 
@@ -115,16 +131,16 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   if (strstr(msg, "type=heartbeat")) {
     if (strstr(msg, "enable=1") && !wifi_enable) {
       wifi_enable = true;
-      Serial.println("[NET] Heartbeat: Robot ENABLED");
+      sysLog("[NET] Heartbeat: Robot ENABLED by Server");
     }
     else if (strstr(msg, "enable=0") && wifi_enable) {
       wifi_enable = false;
-      Serial.println("[NET] Heartbeat: Robot DISABLED");
+      sysLog("[NET] Heartbeat: Robot DISABLED by Server");
     }
   }
   if (strstr(msg, "type=emergency") || strstr(msg, "type=disable")) {
     wifi_enable = false;
-    Serial.println("[NET] KILL SWITCH TRIGGERED");
+    sysLog("[NET] EMERGENCY KILL SWITCH TRIGGERED");
   }
   
   if (currentState == STATE_BASE_NAV && strstr(msg, "entryReply") && strstr(msg, "accepted=true")) {
@@ -132,6 +148,9 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   }
   if (currentState == STATE_AIRLOCK_WAIT && strstr(msg, "openAirlockReply") && strstr(msg, "accepted=true")) {
     airlockCleared = true;
+  }
+  if (currentState == STATE_AIRLOCK_WAIT_B && strstr(msg, "openAirlockBReply") && strstr(msg, "accepted=true")) {
+    airlockBCleared = true;
   }
   
   if ((currentState == STATE_WAIT_SERVER || currentState == STATE_EXIT_WAIT_SERVER) && strstr(msg, "type=isFertileReply")) {
@@ -143,7 +162,8 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     if (xLoc && yLoc) {
       currentX = atoi(xLoc + 2);
       currentY = atoi(yLoc + 2);
-      Serial.print("GPS Updated: "); Serial.print(currentX); Serial.print(","); Serial.println(currentY);
+      snprintf(logBuf, sizeof(logBuf), "[GPS] Location Updated: (%d, %d)", currentX, currentY);
+      sysLog(logBuf);
       
       for(int i=0; i<81; i++) {
         if(!grid[i].known) {
@@ -196,6 +216,8 @@ void setup() {
   Serial.begin(115200);
   Wire.begin(); Wire1.begin(); Wire2.begin();
 
+  sysLog("\n[BOOT] Initializing Hardware...");
+
   pinMode(emitterOdd, OUTPUT); pinMode(emitterEven, OUTPUT);
   digitalWrite(emitterOdd, HIGH); digitalWrite(emitterEven, HIGH);
   pinMode(LED_PIN, OUTPUT); 
@@ -225,22 +247,33 @@ void setup() {
       sum += g.gyro.z; delay(5);
     }
     z_bias = sum / 200.0;
+    sysLog("[BOOT] IMU Calibration Complete.");
+  } else {
+    sysLog("[ERROR] IMU NOT FOUND ON WIRE1");
   }
   
   if (myToF.begin(0x29, Wire2)) { 
     myToF.setResolution(4 * 4); 
     myToF.setRangingFrequency(15); 
     myToF.startRanging(); 
+    sysLog("[BOOT] ToF Initialized");
+  } else {
+    sysLog("[ERROR] ToF NOT FOUND");
   }
   
   for(int i=0; i<81; i++) grid[i].known = false;
   randomSeed(analogRead(0));
   messenger.onMessage(onMessage);
   messenger.begin(WIFI_SSID, WIFI_PASSWORD, BROKER_HOST, BROKER_PORT, GROUP_ID, BoardId);
+  sysLog("[BOOT] Setup Complete. Waiting for Enable.");
 }
 
 void checkGlobalAbort() {
-  if (missionActive && millis() - missionStartTime > ABORT_TIME_MS && currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE && currentState != STATE_EXIT_WAIT_SERVER) {
+  if (missionActive && millis() - missionStartTime > ABORT_TIME_MS && 
+      currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE && 
+      currentState != STATE_EXIT_WAIT_SERVER && currentState != STATE_AIRLOCK_WAIT_B &&
+      currentState != STATE_AIRLOCK_B_DECLINE && currentState != STATE_DOCKED) {
+    sysLog("[MISSION] GLOBAL TIMEOUT TRIGGERED INSIDE LOOP. ABORTING.");
     currentState = STATE_EXIT_SEQUENCE;
   }
 }
@@ -248,22 +281,30 @@ void checkGlobalAbort() {
 void loop() {
   updateUI();
 
+  // 1. The 5-Minute Timer Start Anchor
+  if (robotEnabled() && !missionActive) {
+    missionStartTime = millis();
+    missionActive = true;
+    sysLog("[MISSION] 5-Minute Global Timer Engaged.");
+  }
+
   if (currentState != lastLoggedState) {
-    Serial.print("FSM: ");
-    Serial.println(getStateName(currentState));
+    snprintf(logBuf, sizeof(logBuf), "[FSM] %s -> %s", getStateName(lastLoggedState), getStateName(currentState));
+    sysLog(logBuf);
     lastLoggedState = currentState;
   }
 
   if (!robotEnabled()) { stopMotors(); return; }
 
-  if (missionActive && millis() - missionStartTime > ABORT_TIME_MS && currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE && currentState != STATE_EXIT_WAIT_SERVER) {
-    currentState = STATE_EXIT_SEQUENCE;
-  }
+  // 2. Global Abort Polling
+  checkGlobalAbort();
 
-  if (currentState != STATE_REVIVE_TARGET && currentState != STATE_OBSTACLE_AVOID && currentState != STATE_EXIT_SEQUENCE) {
+  if (currentState != STATE_REVIVE_TARGET && currentState != STATE_OBSTACLE_AVOID && 
+      currentState != STATE_EXIT_SEQUENCE && currentState != STATE_DOCKED) {
     checkFrontObstacle();
     if (pathBlocked) {
       stopMotors();
+      sysLog("[EVENT] Obstacle Detected - Engaging Bypass");
       returnState = currentState; 
       currentState = STATE_OBSTACLE_AVOID;
       return;
@@ -277,7 +318,7 @@ void loop() {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 8) {
           stopMotors();
-          
+          sysLog("[NAV] Line Lost. Intersection Sweep.");
           turnAngle(90.0, true);
           if(isLineDetected()) { lostLineCount=0; break; }
           
@@ -303,6 +344,8 @@ void loop() {
       if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial() && baseTagCount < 2) {
         stopMotors();
         baseTagCount++;
+        snprintf(logBuf, sizeof(logBuf), "[EVENT] Base Tag %d Scanned", baseTagCount);
+        sysLog(logBuf);
         mfrc522.PICC_HaltA();
         
         if(baseTagCount == 1) {
@@ -321,9 +364,7 @@ void loop() {
     case STATE_AIRLOCK_WAIT:
       stopMotors();
       if (airlockCleared) { 
-        missionStartTime = millis();
-        missionActive = true;
-
+        sysLog("[NAV] Airlock Open. Pushing to ramp.");
         unsigned long time = millis();
         while(millis() - time < 10000) {
           executeLineFollow(baseSpeed_6V, 440);
@@ -332,7 +373,6 @@ void loop() {
         }
         moveForwardTicks(800);
         stopMotors();
-
         currentState = STATE_RAMP_APPROACH; 
         pitchUpCount = 0;
       }
@@ -360,16 +400,6 @@ void loop() {
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
         else if (millis() - flatGroundTime > 3000) {
-          currentState = STATE_ARENA_NAV;
-        }
-      } else flatGroundTime = 0;
-      break;
-
-    case STATE_RAMP_DECLINE:
-      executeWallFollow(baseSpeed_6V, 440, 1); 
-      if (abs(pitch) < 5.0) {
-        if (flatGroundTime == 0) flatGroundTime = millis();
-        else if (millis() - flatGroundTime > 1500) {
           currentState = STATE_ARENA_NAV;
         }
       } else flatGroundTime = 0;
@@ -410,6 +440,7 @@ void loop() {
       stopMotors();
       if (!waitingForServer) currentState = isFertileZone ? STATE_PLANT_SEED : STATE_ARENA_NAV;
       else if (millis() - serverWaitStartTime > 5000) {
+        sysLog("[ERROR] Server Timeout. Abandoning Node.");
         currentState = STATE_ARENA_NAV;
       }
       break;
@@ -433,14 +464,15 @@ void loop() {
     case STATE_EXIT_SEQUENCE: {
       if(currentX == 3 && currentY == 1) {
         stopMotors();
+        sysLog("[EXIT] Node (3,1) Achieved. Requesting Airlock B.");
         char query[64]; snprintf(query, sizeof(query), "type=openAirlockB board_id=%s", BoardId);
         messenger.sendToBoard("server", query);
-        while(1) { updateUI(); delay(10); } 
+        currentState = STATE_AIRLOCK_WAIT_B;
+        break;
       }
 
+      // If we don't have GPS coordinates yet, drive forward to find the next grid node
       if(currentX == -1 || currentY == -1) {
-        turnAngle(180.0, true);
-        globalHeading += 180.0;
         currentState = STATE_EXIT_DRIVE;
         break;
       }
@@ -448,16 +480,19 @@ void loop() {
       normalizeHeading();
       float desiredHeading = globalHeading;
       
-      if(currentX > 3) desiredHeading = 90.0; 
-      else if(currentX < 3) desiredHeading = 270.0; 
-      else if(currentY > 1) desiredHeading = 180.0; 
-      else if(currentY < 1) desiredHeading = 0.0; 
+      // Manhattan Routing Decisions
+      if(currentX > 3) desiredHeading = 90.0;       // Face West
+      else if(currentX < 3) desiredHeading = 270.0; // Face East
+      else if(currentY > 1) desiredHeading = 180.0; // Face South
+      else if(currentY < 1) desiredHeading = 0.0;   // Face North
 
       float diff = desiredHeading - globalHeading;
       if(diff > 180.0) diff -= 360.0;
       if(diff < -180.0) diff += 360.0;
 
       if(abs(diff) > 10.0) {
+        snprintf(logBuf, sizeof(logBuf), "[EXIT] Routing. Turning %f degrees.", diff);
+        sysLog(logBuf);
         if(diff > 0) turnAngle(abs(diff), true);
         else turnAngle(abs(diff), false);
         globalHeading = desiredHeading;
@@ -470,7 +505,7 @@ void loop() {
     case STATE_EXIT_DRIVE: {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
-          moveStraightDeadReckoning(800);
+          moveStraightDeadReckoning(400); // Push to center of intersection
           lostLineCount = 0;
         }
       } else lostLineCount = 0;
@@ -498,6 +533,42 @@ void loop() {
       stopMotors();
       if (!waitingForServer) currentState = STATE_EXIT_SEQUENCE;
       else if (millis() - serverWaitStartTime > 5000) currentState = STATE_EXIT_SEQUENCE;
+      break;
+
+    case STATE_AIRLOCK_WAIT_B:
+      stopMotors();
+      if (airlockBCleared) { 
+        sysLog("[NAV] Airlock B Open. Executing decline approach.");
+        unsigned long time = millis();
+        while(millis() - time < 8000) {
+          executeLineFollow(baseSpeed_6V, 440);
+          updateUI();
+          if(!robotEnabled()) break;
+        }
+        currentState = STATE_AIRLOCK_B_DECLINE;
+        flatGroundTime = 0;
+      }
+      break;
+
+    case STATE_AIRLOCK_B_DECLINE:
+      executeWallFollow(baseSpeed_6V, 440, 1);
+      if (pitch < -8.0) {
+        flatGroundTime = 0;
+      } else if (abs(pitch) < 5.0) {
+        if (flatGroundTime == 0) flatGroundTime = millis();
+        else if (millis() - flatGroundTime > 2000) {
+          currentState = STATE_DOCKED;
+        }
+      } else flatGroundTime = 0;
+      break;
+
+    case STATE_DOCKED:
+      stopMotors();
+      // Only log the victory once
+      if (flatGroundTime != 9999) {
+        sysLog("[MISSION COMPLETE] Robot successfully docked in base.");
+        flatGroundTime = 9999; 
+      }
       break;
 
     case STATE_OBSTACLE_AVOID: {
