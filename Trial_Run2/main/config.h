@@ -19,7 +19,9 @@ enum RobotState {
   STATE_OBSTACLE_AVOID,
   STATE_REVIVE_TARGET,
   STATE_DEAD_RECKONING,
-  STATE_EXIT_SEQUENCE // NEW: End of match abort
+  STATE_EXIT_SEQUENCE,
+  STATE_EXIT_DRIVE,
+  STATE_EXIT_WAIT_SERVER
 };
 
 #define START_STATE STATE_BASE_NAV
@@ -65,3 +67,4 @@ void tick2();
 void toggleEnableISR();
 bool robotEnabled();
 void updateUI();
+void normalizeHeading();

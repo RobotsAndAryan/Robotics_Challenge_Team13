@@ -85,6 +85,8 @@ const char* getStateName(RobotState state) {
     case STATE_REVIVE_TARGET: return "REVIVE_TARGET";
     case STATE_DEAD_RECKONING: return "DEAD_RECKONING";
     case STATE_EXIT_SEQUENCE: return "EXIT_SEQUENCE";
+    case STATE_EXIT_DRIVE: return "EXIT_DRIVE";
+    case STATE_EXIT_WAIT_SERVER: return "EXIT_WAIT_SERVER";
     default: return "UNKNOWN";
   }
 }
@@ -113,16 +115,16 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   if (strstr(msg, "type=heartbeat")) {
     if (strstr(msg, "enable=1") && !wifi_enable) {
       wifi_enable = true;
-      Serial.println("[NET] Heartbeat: Robot ENABLED by Server");
+      Serial.println("[NET] Heartbeat: Robot ENABLED");
     }
     else if (strstr(msg, "enable=0") && wifi_enable) {
       wifi_enable = false;
-      Serial.println("[NET] Heartbeat: Robot DISABLED by Server");
+      Serial.println("[NET] Heartbeat: Robot DISABLED");
     }
   }
   if (strstr(msg, "type=emergency") || strstr(msg, "type=disable")) {
     wifi_enable = false;
-    Serial.println("[NET] EMERGENCY KILL SWITCH TRIGGERED");
+    Serial.println("[NET] KILL SWITCH TRIGGERED");
   }
   
   if (currentState == STATE_BASE_NAV && strstr(msg, "entryReply") && strstr(msg, "accepted=true")) {
@@ -132,7 +134,7 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     airlockCleared = true;
   }
   
-  if (currentState == STATE_WAIT_SERVER && strstr(msg, "type=isFertileReply")) {
+  if ((currentState == STATE_WAIT_SERVER || currentState == STATE_EXIT_WAIT_SERVER) && strstr(msg, "type=isFertileReply")) {
     isFertileZone = strstr(msg, "fertile=true") != nullptr;
     waitingForServer = false;
     
@@ -141,8 +143,7 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     if (xLoc && yLoc) {
       currentX = atoi(xLoc + 2);
       currentY = atoi(yLoc + 2);
-      Serial.print("[GPS] Position Updated: ("); 
-      Serial.print(currentX); Serial.print(", "); Serial.print(currentY); Serial.println(")");
+      Serial.print("GPS Updated: "); Serial.print(currentX); Serial.print(","); Serial.println(currentY);
       
       for(int i=0; i<81; i++) {
         if(!grid[i].known) {
@@ -186,11 +187,14 @@ void updateUI() {
   }
 }
 
+void normalizeHeading() {
+  while(globalHeading >= 360.0) globalHeading -= 360.0;
+  while(globalHeading < 0.0) globalHeading += 360.0;
+}
+
 void setup() {
   Serial.begin(115200);
   Wire.begin(); Wire1.begin(); Wire2.begin();
-
-  Serial.println("\n[BOOT] Initializing Hardware...");
 
   pinMode(emitterOdd, OUTPUT); pinMode(emitterEven, OUTPUT);
   digitalWrite(emitterOdd, HIGH); digitalWrite(emitterEven, HIGH);
@@ -214,7 +218,6 @@ void setup() {
   mfrc522.PCD_Init();
 
   if (imu.begin(0x68, &Wire1)) {
-    Serial.println("[BOOT] IMU Found. Calibrating Zero-Rate Bias... DO NOT MOVE.");
     imu.setGyroRange(MPU6050_RANGE_1000_DEG);
     float sum = 0;
     for(int i=0; i<200; i++) {
@@ -222,31 +225,22 @@ void setup() {
       sum += g.gyro.z; delay(5);
     }
     z_bias = sum / 200.0;
-    Serial.print("[BOOT] IMU Calibration Complete. Bias: "); Serial.println(z_bias);
-  } else {
-    Serial.println("[ERROR] IMU NOT FOUND ON WIRE1");
   }
   
   if (myToF.begin(0x29, Wire2)) { 
     myToF.setResolution(4 * 4); 
     myToF.setRangingFrequency(15); 
     myToF.startRanging(); 
-    Serial.println("[BOOT] VL53L5CX ToF Initialized on Wire2");
-  } else {
-    Serial.println("[ERROR] ToF NOT FOUND ON WIRE2");
   }
   
   for(int i=0; i<81; i++) grid[i].known = false;
   randomSeed(analogRead(0));
   messenger.onMessage(onMessage);
   messenger.begin(WIFI_SSID, WIFI_PASSWORD, BROKER_HOST, BROKER_PORT, GROUP_ID, BoardId);
-  Serial.println("[BOOT] Setup Complete. Waiting for Enable.");
 }
 
-// HELPER: Checks global timer to violently break out of trapped FSM loops
 void checkGlobalAbort() {
-  if (missionActive && millis() - missionStartTime > ABORT_TIME_MS && currentState != STATE_EXIT_SEQUENCE) {
-    Serial.println("[MISSION] GLOBAL TIMEOUT DETECTED INSIDE LOOP. ABORTING.");
+  if (missionActive && millis() - missionStartTime > ABORT_TIME_MS && currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE && currentState != STATE_EXIT_WAIT_SERVER) {
     currentState = STATE_EXIT_SEQUENCE;
   }
 }
@@ -255,18 +249,14 @@ void loop() {
   updateUI();
 
   if (currentState != lastLoggedState) {
-    Serial.print("[FSM] Transition: ");
-    Serial.print(getStateName(lastLoggedState));
-    Serial.print(" -> ");
+    Serial.print("FSM: ");
     Serial.println(getStateName(currentState));
     lastLoggedState = currentState;
   }
 
   if (!robotEnabled()) { stopMotors(); return; }
 
-  // Global timeout check at the root level
-  if (missionActive && millis() - missionStartTime > ABORT_TIME_MS && currentState != STATE_EXIT_SEQUENCE) {
-    Serial.println("[MISSION] 3:30 Time Limit Reached. Aborting to Exit Sequence.");
+  if (missionActive && millis() - missionStartTime > ABORT_TIME_MS && currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE && currentState != STATE_EXIT_WAIT_SERVER) {
     currentState = STATE_EXIT_SEQUENCE;
   }
 
@@ -274,7 +264,6 @@ void loop() {
     checkFrontObstacle();
     if (pathBlocked) {
       stopMotors();
-      Serial.println("[EVENT] Obstacle Detected - Halting and Engaging Bypass");
       returnState = currentState; 
       currentState = STATE_OBSTACLE_AVOID;
       return;
@@ -288,14 +277,13 @@ void loop() {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 8) {
           stopMotors();
-          Serial.println("[NAV] Line Lost. Executing Intersection Sweep.");
           
           turnAngle(90.0, true);
-          if(isLineDetected()) { Serial.println("[NAV] Found Line (Left)"); lostLineCount=0; break; }
+          if(isLineDetected()) { lostLineCount=0; break; }
           
           turnAngle(90.0, false);
           moveForwardTicks(250);
-          if(isLineDetected()) { Serial.println("[NAV] Found Line (Straight)"); lostLineCount=0; break; }
+          if(isLineDetected()) { lostLineCount=0; break; }
           
           setMotors(-300, -300, 440);
           unsigned long bt = millis();
@@ -303,7 +291,7 @@ void loop() {
           stopMotors();
           
           turnAngle(90.0, false);
-          if(isLineDetected()) { Serial.println("[NAV] Found Line (Right)"); lostLineCount=0; break; }
+          if(isLineDetected()) { lostLineCount=0; break; }
           
           turnAngle(90.0, false); 
           lostLineCount = 0;
@@ -315,17 +303,14 @@ void loop() {
       if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial() && baseTagCount < 2) {
         stopMotors();
         baseTagCount++;
-        Serial.print("[EVENT] Base Tag Hit. Count: "); Serial.println(baseTagCount);
         mfrc522.PICC_HaltA();
         
         if(baseTagCount == 1) {
-          Serial.println("[NET] Requesting Base Entry (Tag 1)...");
           char query[64]; snprintf(query, sizeof(query), "type=requestEntry board_id=%s", BoardId);
           messenger.sendToBoard("server", query);
           entryCleared = false;
           while(!entryCleared) { updateUI(); delay(10); if(!robotEnabled()) return; }
         } else if(baseTagCount == 2) {
-          Serial.println("[NET] Requesting Airlock Opening (Tag 2)...");
           char query[64]; snprintf(query, sizeof(query), "type=openAirlockA board_id=%s", BoardId);
           messenger.sendToBoard("server", query);
           currentState = STATE_AIRLOCK_WAIT;
@@ -340,7 +325,6 @@ void loop() {
         missionActive = true;
 
         unsigned long time = millis();
-        Serial.println("[NAV] Airlock Open. Executing push to ramp.");
         while(millis() - time < 10000) {
           executeLineFollow(baseSpeed_6V, 440);
           updateUI();
@@ -355,9 +339,8 @@ void loop() {
       break;
 
     case STATE_RAMP_APPROACH:
-      // FIX: Use Wall Following (or Line Following) so approach isn't blindly drifting
       if(!executeWallFollow(baseSpeed_6V, 440, 2)) {
-         setMotors(baseSpeed_6V, baseSpeed_6V, 440); // Backup if walls not visible yet
+         setMotors(baseSpeed_6V, baseSpeed_6V, 440); 
       }
       if (pitch < -10.0) {
         pitchUpCount++;
@@ -373,15 +356,6 @@ void loop() {
 
     case STATE_RAMP_CLIMB:
       executeWallFollow(baseSpeed_7V, 514, 1);
-      if (pitch > 5.0) {
-        pitchDownCount++;
-        if (pitchDownCount > 20) {
-          currentState = STATE_RAMP_DECLINE;
-          flatGroundTime = 0;
-        }
-      } else {
-        pitchDownCount = 0;
-      }
       
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
@@ -402,13 +376,12 @@ void loop() {
       break;
 
     case STATE_ARENA_NAV: {
-      // FIX: Wrap case in {} to safely initialize local variables
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
           stopMotors();
           int r = random(0, 3);
-          if(r==0) { turnAngle(90.0, true); globalHeading += 90; }
-          else if(r==1) { turnAngle(90.0, false); globalHeading -= 90; }
+          if(r==0) { turnAngle(90.0, true); globalHeading += 90.0; }
+          else if(r==1) { turnAngle(90.0, false); globalHeading -= 90.0; }
           else moveForwardTicks(400);
           lostLineCount = 0;
         }
@@ -457,22 +430,74 @@ void loop() {
       currentState = STATE_ARENA_NAV;
       break;
 
-    case STATE_EXIT_SEQUENCE:
-      Serial.println("[EXIT] Orienting towards base vector.");
-      turnAngle(180.0, true);
-      globalHeading += 180;
-      
-      setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-      // FIX: Ensure global timeout doesn't trap the robot inside the exit sequence
-      while(!pathBlocked) {
-        updateUI();
-        if(!robotEnabled()) return;
-        checkFrontObstacle();
-        executeLineFollow(baseSpeed_6V, 440);
+    case STATE_EXIT_SEQUENCE: {
+      if(currentX == 3 && currentY == 1) {
+        stopMotors();
+        char query[64]; snprintf(query, sizeof(query), "type=openAirlockB board_id=%s", BoardId);
+        messenger.sendToBoard("server", query);
+        while(1) { updateUI(); delay(10); } 
       }
+
+      if(currentX == -1 || currentY == -1) {
+        turnAngle(180.0, true);
+        globalHeading += 180.0;
+        currentState = STATE_EXIT_DRIVE;
+        break;
+      }
+
+      normalizeHeading();
+      float desiredHeading = globalHeading;
+      
+      if(currentX > 3) desiredHeading = 90.0; 
+      else if(currentX < 3) desiredHeading = 270.0; 
+      else if(currentY > 1) desiredHeading = 180.0; 
+      else if(currentY < 1) desiredHeading = 0.0; 
+
+      float diff = desiredHeading - globalHeading;
+      if(diff > 180.0) diff -= 360.0;
+      if(diff < -180.0) diff += 360.0;
+
+      if(abs(diff) > 10.0) {
+        if(diff > 0) turnAngle(abs(diff), true);
+        else turnAngle(abs(diff), false);
+        globalHeading = desiredHeading;
+      }
+
+      currentState = STATE_EXIT_DRIVE;
+      break;
+    }
+
+    case STATE_EXIT_DRIVE: {
+      if (!executeLineFollow(baseSpeed_6V, 440)) {
+        if(++lostLineCount > 10) {
+          moveStraightDeadReckoning(800);
+          lostLineCount = 0;
+        }
+      } else lostLineCount = 0;
+
+      if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+        stopMotors();
+        strcpy(currentTag, "");
+        for (byte i=0; i<mfrc522.uid.size; i++) {
+          char hex[4]; snprintf(hex, sizeof(hex), "%02X", mfrc522.uid.uidByte[i]);
+          strcat(currentTag, hex);
+        }
+        mfrc522.PICC_HaltA();
+        
+        char query[128]; snprintf(query, sizeof(query), "type=isFertile tag_id=%s board_id=%s", currentTag, BoardId);
+        messenger.sendToBoard("server", query);
+        
+        waitingForServer = true; 
+        serverWaitStartTime = millis();
+        currentState = STATE_EXIT_WAIT_SERVER;
+      }
+      break;
+    }
+
+    case STATE_EXIT_WAIT_SERVER:
       stopMotors();
-      Serial.println("[EXIT] Barrier hit. Triggering Exit query.");
-      currentState = STATE_ARENA_NAV; 
+      if (!waitingForServer) currentState = STATE_EXIT_SEQUENCE;
+      else if (millis() - serverWaitStartTime > 5000) currentState = STATE_EXIT_SEQUENCE;
       break;
 
     case STATE_OBSTACLE_AVOID: {
@@ -482,13 +507,12 @@ void loop() {
       stopMotors();
 
       turnAngle(90.0, true);  
-      globalHeading += 90;         
+      globalHeading += 90.0;         
       
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       unsigned long bypassStart = millis();
       bool wallTrap = false;
       
-      // FIX: Inject global abort check into blocking avoidance loops
       while(true) {
         updateUI();
         checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
@@ -502,7 +526,7 @@ void loop() {
           while(millis() - bTime < 600) { updateUI(); delay(1); }
           stopMotors();
           turnAngle(90.0, true);
-          globalHeading += 90;
+          globalHeading += 90.0;
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           bypassStart = millis(); 
         }
@@ -516,7 +540,7 @@ void loop() {
       if (wallTrap) {
         stopMotors();
         turnAngle(180.0, true);
-        globalHeading += 180;
+        globalHeading += 180.0;
         setMotors(baseSpeed_6V, baseSpeed_6V, 440);
         while (!isLineDetected()) {
           updateUI();
@@ -526,7 +550,7 @@ void loop() {
         }
         stopMotors();
         turnAngle(90.0, true);
-        globalHeading += 90;
+        globalHeading += 90.0;
         pathBlocked = false;
         currentState = returnState;
         break;
@@ -537,7 +561,7 @@ void loop() {
       stopMotors();
 
       turnAngle(90.0, false);   
-      globalHeading -= 90;       
+      globalHeading -= 90.0;       
 
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       bypassStart = millis();
@@ -556,7 +580,7 @@ void loop() {
           while(millis() - bTime < 600) { updateUI(); delay(1); }
           stopMotors();
           turnAngle(90.0, true);
-          globalHeading += 90;
+          globalHeading += 90.0;
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           bypassStart = millis();
         }
@@ -570,7 +594,7 @@ void loop() {
       if (wallTrap) {
         stopMotors();
         turnAngle(180.0, true);
-        globalHeading += 180;
+        globalHeading += 180.0;
         setMotors(baseSpeed_6V, baseSpeed_6V, 440);
         while (!isLineDetected()) { 
           updateUI(); 
@@ -580,7 +604,7 @@ void loop() {
         }
         stopMotors();
         turnAngle(90.0, true);
-        globalHeading += 90;
+        globalHeading += 90.0;
         pathBlocked = false;
         currentState = returnState;
         break;
@@ -591,7 +615,7 @@ void loop() {
       stopMotors();
 
       turnAngle(90.0, false);   
-      globalHeading -= 90;       
+      globalHeading -= 90.0;       
       
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       while (!isLineDetected()) {
@@ -607,7 +631,7 @@ void loop() {
           while(millis() - bTime < 600) { updateUI(); delay(1); }
           stopMotors();
           turnAngle(90.0, true);
-          globalHeading += 90;
+          globalHeading += 90.0;
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
         }
         delay(5);
@@ -615,7 +639,7 @@ void loop() {
       stopMotors();
       
       turnAngle(90.0, true); 
-      globalHeading += 90;          
+      globalHeading += 90.0;          
       pathBlocked = false;             
       currentState = returnState;      
       break;
