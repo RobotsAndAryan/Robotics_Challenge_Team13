@@ -17,7 +17,9 @@ void stopMotors() {
 
 void turnAngle(float targetAngle, bool turnLeft) {
   stopMotors();
-  delay(300); 
+  unsigned long dStart = millis();
+  while(millis() - dStart < 300) { updateUI(); if(!robotEnabled()) return; delay(1); }
+  
   float currentYaw = 0;
   unsigned long lastIMUTime = micros();
   int lSpeed = turnLeft ? -turning_spd : turning_spd;
@@ -27,6 +29,10 @@ void turnAngle(float targetAngle, bool turnLeft) {
   float actualTarget = targetAngle - 12.0; 
   
   while(abs(currentYaw) < actualTarget) {
+    // FIX: FSM aborts mid-turn if kill switch pressed
+    updateUI(); 
+    if(!robotEnabled()) { stopMotors(); return; }
+
     sensors_event_t a, g, t;
     imu.getEvent(&a, &g, &t);
     unsigned long now = micros();
@@ -35,27 +41,34 @@ void turnAngle(float targetAngle, bool turnLeft) {
     float gyroZ = (g.gyro.z - z_bias) * 57.2958; 
     if(abs(gyroZ) > 1.0) currentYaw += gyroZ * dt;
   }
+  
   stopMotors();
-  delay(300); 
+  dStart = millis();
+  while(millis() - dStart < 300) { updateUI(); if(!robotEnabled()) return; delay(1); }
   lastError = 0; 
 }
 
 void moveForwardTicks(long targetTicks) {
   pos1 = 0; pos2 = 0;
   setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-  while(abs(pos1) < targetTicks && abs(pos2) < targetTicks) { delay(1); }
+  while(abs(pos1) < targetTicks && abs(pos2) < targetTicks) { 
+    updateUI(); 
+    if(!robotEnabled()) { stopMotors(); return; }
+    delay(1); 
+  }
   stopMotors();
 }
 
-// NEW: Task 4 Open-Field Dead Reckoning
 void moveStraightDeadReckoning(long targetTicks) {
-  Serial.print("Dead Reckoning Started: "); Serial.print(targetTicks); Serial.println(" ticks");
   pos1 = 0; pos2 = 0;
   float currentYaw = 0;
   unsigned long lastIMUTime = micros();
   
   while(abs(pos1) < targetTicks && abs(pos2) < targetTicks) {
-    // 1. Integrate Gyro for Heading
+    // FIX: Ensures robot doesn't run away during dead reckoning
+    updateUI();
+    if(!robotEnabled()) { stopMotors(); return; }
+
     sensors_event_t a, g, t;
     imu.getEvent(&a, &g, &t);
     unsigned long now = micros();
@@ -65,14 +78,11 @@ void moveStraightDeadReckoning(long targetTicks) {
     float gyroZ = (g.gyro.z - z_bias) * 57.2958; 
     if(abs(gyroZ) > 1.0) currentYaw += gyroZ * dt;
 
-    // 2. Proportional Correction to stay on 0 degree line
     float headingError = 0.0 - currentYaw; 
     float correction = Kp_heading * headingError;
 
-    // 3. Apply Correction to Wheels
     setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
-    delay(2); // Stability delay
+    delay(2); 
   }
   stopMotors();
-  Serial.println("Dead Reckoning Complete.");
 }

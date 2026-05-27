@@ -29,10 +29,10 @@ int emitterOdd = 37; int emitterEven = 38;
 int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
-float Kp_line = 5.0; float Kd_line = 2.5; 
+float Kp_line = 10.0; float Kd_line = 5.0; 
 float Kp_wall = 5.0; float wall_target = 130.0;
-float Kp_heading = 6.0; // Tuning constant for straight line gyro
-int baseSpeed_6V = 400; int baseSpeed_7V = 400; 
+float Kp_heading = 6.0; 
+int baseSpeed_6V = 440; int baseSpeed_7V = 550; 
 int turning_spd = 550;
 float lastError = 0;
 int obstacleThreshold = 200; 
@@ -69,6 +69,45 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   if (currentState == STATE_WAIT_SERVER && strstr(msg, "fertility_resp")) {
     isFertileZone = strstr(msg, "fertile=1") != nullptr;
     waitingForServer = false;
+  }
+}
+
+// FIX: Centralized UI Polling. This runs everywhere, even inside motion loops.
+void updateUI() {
+  messenger.loop();
+
+  // 1. Hardware Kill Switch Toggle
+  static unsigned long lastBtn = 0;
+  if (digitalRead(BUTTON_PIN) == LOW && millis() - lastBtn > 300) {
+    physical_enable = !physical_enable;
+    lastBtn = millis();
+    Serial.print("Physical Enable Toggled: "); Serial.println(physical_enable);
+  }
+
+  // 2. LED Status Management (Mutually Exclusive)
+  static unsigned long lastBlink = 0;
+  static bool ledOn = false;
+  if (robotEnabled()) {
+    digitalWrite(LED_PIN, HIGH); // Solid Red
+    // Only allow Green LED to light up if the robot is actually active
+    digitalWrite(GREEN_LED_PIN, digitalRead(REVIVAL_BUTTON_PIN) == LOW ? HIGH : LOW);
+  } else {
+    digitalWrite(GREEN_LED_PIN, LOW); // Force off
+    if (millis() - lastBlink >= 500) { // Blink Red
+      lastBlink = millis();
+      ledOn = !ledOn;
+      digitalWrite(LED_PIN, ledOn ? HIGH : LOW);
+    }
+  }
+
+  // 3. Network Heartbeat
+  if (physical_enable) {
+    static unsigned long lastReg = 0;
+    if (millis() - lastReg > 5000) {
+      char reg[64]; snprintf(reg, sizeof(reg), "type=register team_id=%s board_id=%s", GROUP_ID, BoardId);
+      messenger.sendToBoard("server", reg);
+      lastReg = millis();
+    }
   }
 }
 
@@ -116,25 +155,7 @@ void setup() {
 }
 
 void loop() {
-  messenger.loop();
-
-  digitalWrite(GREEN_LED_PIN, digitalRead(REVIVAL_BUTTON_PIN) == LOW ? HIGH : LOW);
-
-  static unsigned long lastBtn = 0;
-  if (digitalRead(BUTTON_PIN) == LOW && millis() - lastBtn > 300) {
-    physical_enable = !physical_enable;
-    lastBtn = millis();
-    Serial.print("Physical Enable Toggled: "); Serial.println(physical_enable);
-  }
-
-  if (physical_enable) {
-    static unsigned long lastReg = 0;
-    if (millis() - lastReg > 5000) {
-      char reg[64]; snprintf(reg, sizeof(reg), "type=register team_id=%s board_id=%s", GROUP_ID, BoardId);
-      messenger.sendToBoard("server", reg);
-      lastReg = millis();
-    }
-  }
+  updateUI();
 
   if (!robotEnabled()) { stopMotors(); return; }
 
@@ -158,7 +179,6 @@ void loop() {
         char query[64]; snprintf(query, sizeof(query), "type=openAirlockA board_id=%s", BoardId);
         messenger.sendToBoard("server", query);
         mfrc522.PICC_HaltA();
-        Serial.println("Base Tag Hit -> STATE_AIRLOCK_WAIT");
         currentState = STATE_AIRLOCK_WAIT;
       }
       break;
@@ -166,7 +186,6 @@ void loop() {
     case STATE_AIRLOCK_WAIT:
       stopMotors();
       if (airlockCleared) { 
-        Serial.println("Airlock Cleared -> STATE_RAMP_CLIMB");
         currentState = STATE_RAMP_CLIMB; 
         flatGroundTime = 0; 
       }
@@ -174,11 +193,10 @@ void loop() {
 
     case STATE_RAMP_CLIMB:
       moveStraightDeadReckoning(1200);
-      executeWallFollow(baseSpeed_7V, 514,1); //mode 1 for ramp(just left)
+      executeWallFollow(baseSpeed_7V, 514, 1);
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
         else if (millis() - flatGroundTime > 2000) {
-          Serial.println("Ramp Cleared -> STATE_ARENA_NAV");
           currentState = STATE_ARENA_NAV;
         }
       } else {
@@ -187,18 +205,15 @@ void loop() {
       break;
 
     case STATE_ARENA_NAV:
-      // 1. Try Line Following
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
-          // 2. Line is lost. Try Wall Following.
-          if(!executeWallFollow(baseSpeed_6V, 440,2)) { // mode 2 for arena (so its based on where it is)
-            // 3. No Line, No Walls. Execute Open-Field Dead Reckoning across gap.
-            Serial.println("No Line, No Walls -> Executing Dead Reckoning");
-            moveStraightDeadReckoning(800); // Drives straight for ~800 ticks, adjusting heading
+          if(!executeWallFollow(baseSpeed_6V, 440, 2)) {
+            moveStraightDeadReckoning(800); 
             
-            // After dead reckoning blind jump, stop and look for a path
             stopMotors();
-            delay(300);
+            unsigned long delayStart = millis();
+            while(millis() - delayStart < 300) { updateUI(); if(!robotEnabled()) return; delay(1); }
+            
             int distL = getLidar(Wire, 0x10);
             int distR = getLidar(Wire1, 0x12);
             if (distL > distR) turnAngle(90.0, true);
@@ -210,69 +225,57 @@ void loop() {
         lostLineCount = 0;
       }
 
-      // Check Tags in Arena
       if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
         stopMotors();
-        delay(1000);
+        unsigned long delayStart = millis();
+        while(millis() - delayStart < 1000) { updateUI(); if(!robotEnabled()) return; delay(1); }
         
-        // --- HARDCODE RESCUE TRIGGER FOR TESTING ---
-        // If you want to trigger revival, uncomment this and check a specific tag ID
-        /*
-        if (mfrc522.uid.uidByte[0] == 0xAA) { 
-           mfrc522.PICC_HaltA();
-           Serial.println("Rescue Tag Hit -> STATE_REVIVE_TARGET");
-           currentState = STATE_REVIVE_TARGET;
-           break;
-        }
-        */
-
-        moveForwardTicks(700);
+        moveForwardTicks(640);
         mfrc522.PICC_HaltA();
         
         currentServoAngle += 40;
         if(currentServoAngle > 180) currentServoAngle = 0;
         seedServo.write(currentServoAngle);
-        delay(1000);
+        
+        delayStart = millis();
+        while(millis() - delayStart < 1000) { updateUI(); if(!robotEnabled()) return; delay(1); }
         lastError = 0;
       }
       break;
 
-    case STATE_REVIVE_TARGET:{
-      // Task 8: Touch-Based Revival
+    case STATE_REVIVE_TARGET: {
       int clearance = getFrontClearanceMM();
       
       if (clearance > 800) {
-        Serial.println("Revival: Searching for target...");
-        setMotors(0, 0, 440); // Too far, wait or spin to search
+        setMotors(0, 0, 440); 
       } 
       else if (clearance > 80) {
-        // Target seen, execute controlled deceleration profile
-        Serial.print("Revival: Approaching. Dist: "); Serial.println(clearance);
-        // Speed drops as clearance drops (Proportional braking)
         int approachSpeed = map(clearance, 80, 800, 150, 400); 
         setMotors(approachSpeed, approachSpeed, 440);
       } 
       else {
-        // We are within 80mm. Kill motors, coast into contact, wait.
-        Serial.println("Revival: Contact Imminent. Halting.");
         stopMotors();
-        delay(5000); // Wait 5 seconds to simulate revival process
+        // FIX: Active polling delay replaces static delay(5000)
+        unsigned long waitStart = millis();
+        while(millis() - waitStart < 5000) {
+          updateUI();
+          if(!robotEnabled()) return;
+          delay(10);
+        }
         
-        // Back up slightly after revival
         setMotors(-300, -300, 440);
-        delay(1000);
+        waitStart = millis();
+        while(millis() - waitStart < 1000) { updateUI(); if(!robotEnabled()) return; delay(1); }
         stopMotors();
         
-        Serial.println("Revival Complete -> STATE_ARENA_NAV");
         currentState = STATE_ARENA_NAV;
       }
       break;
     }
-    // Placeholder states left intact to avoid compile errors if you switch tags back
-    case STATE_WAIT_SERVER:
 
+    case STATE_WAIT_SERVER:
     case STATE_PLANT_SEED:
-    case STATE_DEAD_RECKONING: // Directly called as a function now, state kept for architecture
+    case STATE_DEAD_RECKONING: 
       break;
   }
 }

@@ -70,4 +70,5 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
       break;
     }
   }
+  return false;
 }

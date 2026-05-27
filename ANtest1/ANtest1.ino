@@ -59,8 +59,8 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   }
 }
 void move_forward(){
-  mc.setSpeed(1,660);
-  mc.setSpeed(3,660);
+  mc.setSpeed(1,-440);
+  mc.setSpeed(3,-440);
 }
 void stop(){
   mc.setSpeed(1,0);

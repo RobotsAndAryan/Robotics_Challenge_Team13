@@ -18,8 +18,7 @@ enum RobotState {
   STATE_REVIVE_TARGET
 };
 
-// Change this to test different phases instantly
-#define START_STATE STATE_BASE_NAV
+#define START_STATE STATE_ARENA_NAV
 
 extern MotoronI2C mc;
 extern Adafruit_MPU6050 imu;
@@ -48,7 +47,7 @@ extern int weights[9];
 
 extern float Kp_line; extern float Kd_line; 
 extern float Kp_wall; extern float wall_target;
-extern float Kp_heading; // New constant for Dead Reckoning
+extern float Kp_heading; 
 extern int baseSpeed_6V; extern int baseSpeed_7V; 
 extern int turning_spd;
 extern float lastError;
@@ -60,3 +59,4 @@ extern float z_bias;
 void tick1();
 void tick2();
 bool robotEnabled();
+void updateUI(); // New central UI polling function

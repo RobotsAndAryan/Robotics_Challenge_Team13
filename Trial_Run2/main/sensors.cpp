@@ -27,7 +27,6 @@ void checkFrontObstacle() {
   }
 }
 
-// NEW: For Revival Task deceleration 
 int getFrontClearanceMM() {
   if (myToF.isDataReady()) {
     VL53L5CX_ResultsData data;
