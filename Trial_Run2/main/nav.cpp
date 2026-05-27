@@ -69,6 +69,38 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
       return false;
       break;
     }
+    case 3:{
+      int distR = getLidar(Wire1, 0x12);
+      if(distR < 0) distR = 999;
+
+      if (distR < 350) {
+        float wallError = wall_target - distR; 
+        setMotors(bSpeed + (Kp_wall * wallError), bSpeed - (Kp_wall * wallError), maxPWM);
+        return true;
+      }
+      return false;
+      break;
+    }
+  }
+  return false;
+}
+
+// FIX: Scanner function for Task 7. Stops driving forward once the line is found.
+bool isLineDetected() {
+  uint16_t lineVals[9];
+  for(int i=0; i<9; i++) { pinMode(linePins[i], OUTPUT); digitalWrite(linePins[i], HIGH); }
+  delayMicroseconds(15);
+  for(int i=0; i<9; i++) { pinMode(linePins[i], INPUT); lineVals[i] = 1000; }
+  
+  unsigned long st = micros();
+  while(micros() - st < 1000) {
+    for(int i=0; i<9; i++) {
+      if(lineVals[i] == 1000 && digitalRead(linePins[i]) == LOW) lineVals[i] = micros() - st;
+    }
+  }
+
+  for(int i=0; i<9; i++) {
+    if(lineVals[i] > 500) return true;
   }
   return false;
 }

@@ -17,7 +17,7 @@ const int BUTTON_PIN = 2;
 const int GREEN_LED_PIN = 3;
 const int REVIVAL_BUTTON_PIN = 46;
 
-bool physical_enable = true;   
+volatile bool physical_enable = true;   
 bool wifi_enable = false;      
 bool pathBlocked = false;
 
@@ -41,6 +41,7 @@ int currentServoAngle = 0;
 float z_bias = 0.0;
 
 RobotState currentState = START_STATE;
+RobotState returnState = START_STATE; // Used to resume after avoiding obstacles
 
 bool airlockCleared = false;
 bool waitingForServer = false;
@@ -51,6 +52,16 @@ char currentTag[32] = "";
 
 void tick1() { if (digitalRead(enc1A) == digitalRead(enc1B)) pos1++; else pos1--; }
 void tick2() { if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++; else pos2--; }
+
+volatile unsigned long lastInterruptTime = 0;
+void toggleEnableISR() {
+  unsigned long interruptTime = millis();
+  if (interruptTime - lastInterruptTime > 300) {
+    physical_enable = !physical_enable;
+    lastInterruptTime = interruptTime;
+  }
+}
+
 bool robotEnabled() { return physical_enable && wifi_enable; }
 
 void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t length) {
@@ -66,41 +77,32 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   }
   if (strstr(msg, "type=emergency") || strstr(msg, "type=disable")) wifi_enable = false;
   if (currentState == STATE_AIRLOCK_WAIT && strstr(msg, "openAirlockReply") && strstr(msg, "accepted=true")) airlockCleared = true;
-  if (currentState == STATE_WAIT_SERVER && strstr(msg, "fertility_resp")) {
-    isFertileZone = strstr(msg, "fertile=1") != nullptr;
+  
+  // FIX: Accurate API parsing for the fertility check
+  if (currentState == STATE_WAIT_SERVER && strstr(msg, "type=isFertileReply")) {
+    isFertileZone = strstr(msg, "fertile=true") != nullptr;
     waitingForServer = false;
   }
 }
 
-// FIX: Centralized UI Polling. This runs everywhere, even inside motion loops.
 void updateUI() {
   messenger.loop();
 
-  // 1. Hardware Kill Switch Toggle
-  static unsigned long lastBtn = 0;
-  if (digitalRead(BUTTON_PIN) == LOW && millis() - lastBtn > 300) {
-    physical_enable = !physical_enable;
-    lastBtn = millis();
-    Serial.print("Physical Enable Toggled: "); Serial.println(physical_enable);
-  }
-
-  // 2. LED Status Management (Mutually Exclusive)
   static unsigned long lastBlink = 0;
   static bool ledOn = false;
+
   if (robotEnabled()) {
-    digitalWrite(LED_PIN, HIGH); // Solid Red
-    // Only allow Green LED to light up if the robot is actually active
+    digitalWrite(LED_PIN, HIGH);
     digitalWrite(GREEN_LED_PIN, digitalRead(REVIVAL_BUTTON_PIN) == LOW ? HIGH : LOW);
   } else {
-    digitalWrite(GREEN_LED_PIN, LOW); // Force off
-    if (millis() - lastBlink >= 500) { // Blink Red
+    digitalWrite(GREEN_LED_PIN, LOW); 
+    if (millis() - lastBlink >= 500) {
       lastBlink = millis();
       ledOn = !ledOn;
       digitalWrite(LED_PIN, ledOn ? HIGH : LOW);
     }
   }
 
-  // 3. Network Heartbeat
   if (physical_enable) {
     static unsigned long lastReg = 0;
     if (millis() - lastReg > 5000) {
@@ -117,7 +119,10 @@ void setup() {
 
   pinMode(emitterOdd, OUTPUT); pinMode(emitterEven, OUTPUT);
   digitalWrite(emitterOdd, HIGH); digitalWrite(emitterEven, HIGH);
-  pinMode(LED_PIN, OUTPUT); pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT); 
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), toggleEnableISR, FALLING);
+  
   pinMode(GREEN_LED_PIN, OUTPUT); digitalWrite(GREEN_LED_PIN, LOW);
   pinMode(REVIVAL_BUTTON_PIN, INPUT_PULLUP);
   
@@ -151,7 +156,6 @@ void setup() {
 
   messenger.onMessage(onMessage);
   messenger.begin(WIFI_SSID, WIFI_PASSWORD, BROKER_HOST, BROKER_PORT, GROUP_ID, BoardId);
-  Serial.print("Booted into Mode: "); Serial.println(currentState);
 }
 
 void loop() {
@@ -159,12 +163,14 @@ void loop() {
 
   if (!robotEnabled()) { stopMotors(); return; }
 
-  // Bypass front obstacle check ONLY if we are doing the revival rescue sequence
-  if (currentState != STATE_REVIVE_TARGET) {
+  // FIX: Trigger bypass sequence if object is detected
+  if (currentState != STATE_REVIVE_TARGET && currentState != STATE_OBSTACLE_AVOID) {
     checkFrontObstacle();
     if (pathBlocked) {
-      Serial.println("Obstacle Detected - Emergency Halt");
       stopMotors();
+      Serial.println("Obstacle Detected - Initiating Bypass Maneuver");
+      returnState = currentState; // Remember what we were doing
+      currentState = STATE_OBSTACLE_AVOID;
       return;
     }
   }
@@ -192,16 +198,26 @@ void loop() {
       break;
 
     case STATE_RAMP_CLIMB:
-      moveStraightDeadReckoning(1200);
       executeWallFollow(baseSpeed_7V, 514, 1);
-      if (abs(pitch) < 5.0) {
-        if (flatGroundTime == 0) flatGroundTime = millis();
-        else if (millis() - flatGroundTime > 2000) {
-          currentState = STATE_ARENA_NAV;
-        }
-      } else {
+      
+      // FIX: Check if we crested the hill and are now going down
+      if (pitch < -5.0) {
+        currentState = STATE_RAMP_DECLINE;
         flatGroundTime = 0;
       }
+      else if (abs(pitch) < 5.0) {
+        if (flatGroundTime == 0) flatGroundTime = millis();
+        else if (millis() - flatGroundTime > 2000) currentState = STATE_ARENA_NAV;
+      } else flatGroundTime = 0;
+      break;
+
+    case STATE_RAMP_DECLINE:
+      // Drop back to safe base speed so gravity doesn't accelerate us into a crash
+      executeWallFollow(baseSpeed_6V, 440, 1); 
+      if (abs(pitch) < 5.0) {
+        if (flatGroundTime == 0) flatGroundTime = millis();
+        else if (millis() - flatGroundTime > 2000) currentState = STATE_ARENA_NAV;
+      } else flatGroundTime = 0;
       break;
 
     case STATE_ARENA_NAV:
@@ -209,7 +225,6 @@ void loop() {
         if(++lostLineCount > 10) {
           if(!executeWallFollow(baseSpeed_6V, 440, 2)) {
             moveStraightDeadReckoning(800); 
-            
             stopMotors();
             unsigned long delayStart = millis();
             while(millis() - delayStart < 300) { updateUI(); if(!robotEnabled()) return; delay(1); }
@@ -221,27 +236,71 @@ void loop() {
             lostLineCount = 0;
           }
         }
-      } else {
-        lostLineCount = 0;
-      }
+      } else lostLineCount = 0;
 
       if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
         stopMotors();
-        unsigned long delayStart = millis();
-        while(millis() - delayStart < 1000) { updateUI(); if(!robotEnabled()) return; delay(1); }
         
-        moveForwardTicks(640);
+        strcpy(currentTag, "");
+        for (byte i=0; i<mfrc522.uid.size; i++) {
+          char hex[4]; snprintf(hex, sizeof(hex), "%02X", mfrc522.uid.uidByte[i]);
+          strcat(currentTag, hex);
+        }
         mfrc522.PICC_HaltA();
         
-        currentServoAngle += 40;
-        if(currentServoAngle > 180) currentServoAngle = 0;
-        seedServo.write(currentServoAngle);
-        
-        delayStart = millis();
-        while(millis() - delayStart < 1000) { updateUI(); if(!robotEnabled()) return; delay(1); }
-        lastError = 0;
+        char query[128]; snprintf(query, sizeof(query), "type=isFertile tag_id=%s board_id=%s", currentTag, BoardId);
+        messenger.sendToBoard("server", query);
+        waitingForServer = true; 
+        serverWaitStartTime = millis();
+        currentState = STATE_WAIT_SERVER;
       }
       break;
+
+    case STATE_WAIT_SERVER:
+      stopMotors();
+      if (!waitingForServer) currentState = isFertileZone ? STATE_PLANT_SEED : STATE_ARENA_NAV;
+      else if (millis() - serverWaitStartTime > 5000) currentState = STATE_ARENA_NAV;
+      break;
+
+    case STATE_PLANT_SEED:
+      moveForwardTicks(640);
+      currentServoAngle += 40;
+      if(currentServoAngle > 180) currentServoAngle = 0;
+      seedServo.write(currentServoAngle);
+      
+      for(int d=0; d<15; d++) { delay(100); updateUI(); }
+      
+      {
+        char notify[128]; snprintf(notify, sizeof(notify), "type=seedPlanted tag_id=%s board_id=%s", currentTag, BoardId);
+        messenger.sendToBoard("server", notify);
+      }
+      lastError = 0;
+      currentState = STATE_ARENA_NAV;
+      break;
+
+    case STATE_OBSTACLE_AVOID: {
+      // FIX: Execute Task 7 Geometric Bypass Maneuver
+      turnAngle(90.0, true);           // 1. Turn Left
+      moveStraightDeadReckoning(800);  // 2. Drive outward to clear object width
+      turnAngle(90.0, false);          // 3. Turn Right
+      moveStraightDeadReckoning(1200); // 4. Drive forward past the object length
+      turnAngle(90.0, false);          // 5. Turn Right 
+      
+      // 6. Drive back towards the track until the line sensors see black
+      setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+      while (!isLineDetected()) {
+        updateUI();
+        if(!robotEnabled()) { stopMotors(); return; }
+        delay(1);
+      }
+      stopMotors();
+      
+      turnAngle(90.0, true);           // 7. Turn Left to re-align with track heading
+      
+      pathBlocked = false;             // Reset safety flag
+      currentState = returnState;      // Resume previous FSM task
+      break;
+    }
 
     case STATE_REVIVE_TARGET: {
       int clearance = getFrontClearanceMM();
@@ -255,7 +314,6 @@ void loop() {
       } 
       else {
         stopMotors();
-        // FIX: Active polling delay replaces static delay(5000)
         unsigned long waitStart = millis();
         while(millis() - waitStart < 2000) {
           updateUI();
@@ -273,8 +331,6 @@ void loop() {
       break;
     }
 
-    case STATE_WAIT_SERVER:
-    case STATE_PLANT_SEED:
     case STATE_DEAD_RECKONING: 
       break;
   }

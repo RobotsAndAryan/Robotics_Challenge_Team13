@@ -29,7 +29,6 @@ void turnAngle(float targetAngle, bool turnLeft) {
   float actualTarget = targetAngle - 12.0; 
   
   while(abs(currentYaw) < actualTarget) {
-    // FIX: FSM aborts mid-turn if kill switch pressed
     updateUI(); 
     if(!robotEnabled()) { stopMotors(); return; }
 
@@ -65,7 +64,6 @@ void moveStraightDeadReckoning(long targetTicks) {
   unsigned long lastIMUTime = micros();
   
   while(abs(pos1) < targetTicks && abs(pos2) < targetTicks) {
-    // FIX: Ensures robot doesn't run away during dead reckoning
     updateUI();
     if(!robotEnabled()) { stopMotors(); return; }
 

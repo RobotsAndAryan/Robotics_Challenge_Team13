@@ -11,14 +11,16 @@ enum RobotState {
   STATE_BASE_NAV,
   STATE_AIRLOCK_WAIT,
   STATE_RAMP_CLIMB,
+  STATE_RAMP_DECLINE, // NEW: Handles going downhill safely
   STATE_ARENA_NAV,
   STATE_WAIT_SERVER,
   STATE_PLANT_SEED,
   STATE_DEAD_RECKONING,
+  STATE_OBSTACLE_AVOID, // NEW: Geometric bypass maneuver
   STATE_REVIVE_TARGET
 };
 
-#define START_STATE STATE_ARENA_NAV
+#define START_STATE STATE_BASE_NAV
 
 extern MotoronI2C mc;
 extern Adafruit_MPU6050 imu;
@@ -33,7 +35,7 @@ extern const int BUTTON_PIN;
 extern const int GREEN_LED_PIN;
 extern const int REVIVAL_BUTTON_PIN;
 
-extern bool physical_enable;   
+extern volatile bool physical_enable;   
 extern bool wifi_enable;      
 extern bool pathBlocked;
 
@@ -58,5 +60,6 @@ extern float z_bias;
 
 void tick1();
 void tick2();
+void toggleEnableISR();
 bool robotEnabled();
-void updateUI(); // New central UI polling function
+void updateUI();
