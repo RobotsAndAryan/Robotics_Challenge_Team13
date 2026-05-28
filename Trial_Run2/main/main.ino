@@ -32,7 +32,7 @@ int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40};
 float Kp_line = 20.0; float Kd_line = 5.0; 
 float Kp_wall = 5.0; float wall_target = 130.0;
 float Kp_heading = 6.0; 
-int baseSpeed_6V = 350; int baseSpeed_7V = 550; 
+int baseSpeed_6V = 380; int baseSpeed_7V = 550; 
 int turning_spd = 480;
 float lastError = 0;
 int obstacleThreshold = 100; 
@@ -49,6 +49,7 @@ bool missionActive = false;
 const unsigned long ABORT_TIME_MS = 240000; 
 
 int base_seq = 0; 
+int baseTagCount = 0;
 bool entryCleared = false;
 bool airlockCleared = false;
 bool airlockBCleared = false;
@@ -107,6 +108,27 @@ void tick2() { if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++; else pos2--
 
 bool robotEnabled() { return physical_enable && wifi_enable; }
 
+bool isIntersection() {
+  uint16_t lineVals[9];
+  for(int i=0; i<9; i++) { pinMode(linePins[i], OUTPUT); digitalWrite(linePins[i], HIGH); }
+  delayMicroseconds(15);
+  for(int i=0; i<9; i++) { pinMode(linePins[i], INPUT); lineVals[i] = 1000; }
+  
+  unsigned long st = micros();
+  while(micros() - st < 1000) {
+    for(int i=0; i<9; i++) {
+      if(lineVals[i] == 1000 && digitalRead(linePins[i]) == LOW) lineVals[i] = micros() - st;
+    }
+  }
+  
+  int activeCount = 0;
+  for(int i=0; i<9; i++) {
+    if(lineVals[i] > 500) activeCount++;
+  }
+  return (activeCount >= 5);
+}
+
+// FIX: Added direct logging so you NEVER have to guess if the reader is working
 bool readTagUID() {
   if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
     stopMotors();
@@ -116,6 +138,9 @@ bool readTagUID() {
       strcat(currentTag, hex);
     }
     mfrc522.PICC_HaltA();
+    
+    snprintf(logBuf, sizeof(logBuf), "[RFID] Scanned: %s", currentTag);
+    sysLog(logBuf);
     return true;
   }
   return false;
@@ -255,9 +280,10 @@ void setup() {
     z_bias = sum / 200.0;
   }
   
+  // FIX: Sensor hardware limit is 60Hz. Setting to 100Hz causes I2C buffer overruns.
   if (myToF.begin(0x29, Wire2)) { 
     myToF.setResolution(4 * 4); 
-    myToF.setRangingFrequency(100); 
+    myToF.setRangingFrequency(60); 
     myToF.startRanging(); 
   }
   
@@ -328,7 +354,7 @@ void loop() {
             moveForwardTicks(400); 
             base_seq = 3;
           } else if(base_seq == 4) {
-            sysLog("Junc 2: Turn Right");
+            sysLog("Junc 2 Fallback: Turn Right");
             turnAngle(120.0, false);
             base_seq = 5;
           } else {
@@ -338,23 +364,37 @@ void loop() {
         }
       } else {
         lostLineCount = 0;
+        
+        if (base_seq == 4) {
+          if (isIntersection()) {
+            stopMotors();
+            sysLog("Junc 2 (Line Int Detected): Turn Right");
+            moveForwardTicks(300); 
+            turnAngle(120.0, false); 
+            base_seq = 5;
+          }
+        }
       }
 
+      // FIX: Decoupled Tag processing from base_seq to allow manual track testing
       if (readTagUID()) {
-        if(base_seq == 1) {
-          sysLog("Tag A Scanned");
-          sysLog("Entry Granted. 180 flip.");
+        baseTagCount++;
+        
+        if(baseTagCount == 1) {
+          sysLog("[EVENT] Base Tag A Scanned");
+          sysLog("[NAV] Entry Granted. 180 flip.");
           turnAngle(180.0, true);
-          base_seq = 2;
-        } else if(base_seq == 3) {
-          sysLog("Tag B Scanned");
+          base_seq = 2; // Keep sequence moving forward
+        } 
+        else if(baseTagCount == 2) {
+          sysLog("[EVENT] Base Tag B Scanned");
           char query[128]; snprintf(query, sizeof(query), "type=openAirlock airlock=A tag_id=%s board_id=%s", currentTag, BoardId);
           messenger.sendToBoard("server", query);
           airlockCleared = false;
           while(!airlockCleared) { updateUI(); delay(10); if(!robotEnabled()) return; }
-          sysLog("Airlock Open. Pushing through.");
+          sysLog("[NAV] Airlock Open. Pushing through.");
           moveForwardTicks(800);
-          base_seq = 4;
+          base_seq = 4; // Advance to Ramp right-turn search
         }
       }
 
