@@ -11,14 +11,14 @@ For our navigation strategy, we quickly realized that just wandering around unti
 ## 📂 Repository Structure
 We separated our code into different files to keep the main loop clean and make it easier to debug specific parts of the hardware:
 
-* `Robotics_Challenge_Team13.ino` - The main loop. It checks the network, handles the safety kill switches, and runs the main FSM.
+* `main.ino` - The main loop. It checks the network, handles the safety kill switches, and runs the main FSM.
 * `config.h` - All our global variables, pin numbers, and PID/Motor speed limits.
 * `motion.cpp / .h` - Handles the motor drivers, PWM voltage limits, and our IMU-assisted driving so it drives straight when off the line.
 * `sensors.cpp / .h` - Reads the ToF sensor matrix and gets the pitch angle from the IMU.
 * `nav.cpp / .h` - Holds the PID line follower logic and the wall-following code.
 * `secrets.h` - (Not tracked in git) Contains our WiFi SSID/Passwords and MQTT IPs.
-* `/docs` - Extra testing notes and offline hardware diagrams.
-* `/tests` - Old scripts we used to unit-test the RFID and ToF sensors by themselves before integrating them.
+* `/docs` - Folder with Targets to attain, videos of robot's functions working and a report with evidence of sensor logging.
+* `/tests` - Old scripts we used to unit-test each component by themselves before integrating them as well.
 
 ---
 
@@ -41,7 +41,7 @@ You'll need these libraries installed to compile our code:
 
 1. Clone this repo.
 2. Create a `secrets.h` file next to the `.ino` file and put in your WiFi and MQTT credentials.
-3. Open `Robotics_Challenge_Team13.ino` in the Arduino IDE (Board: Arduino Giga R1 WiFi) and upload it.
+3. Open `main.ino` in the Arduino IDE (Board: Arduino Giga R1 WiFi) and upload it.
 4. **IMU Calibration:** **DO NOT TOUCH THE ROBOT FOR 3 SECONDS AFTER TURNING IT ON.** The MPU6050 takes 200 samples to figure out its zero-bias. If you bump it, the dead-reckoning will curve.
 5. **Running the Tasks:**
    * **Tasks 1-6 (Base to Arena):** Turn it on normally. It starts in safe mode. Press the button on `Pin 2` to arm the motors.
@@ -224,7 +224,7 @@ Getting the logic to match the physical real-world testing took a lot of trial a
 ---
 
 ## 🏆 Trial #2 Checklist
-*This validates what our robot can actually do against the COMP0204 grading rubric.*[cite: 2]
+*This validates what our robot can actually do against the COMP0204 grading rubric.*
 
 - [x] **1. Standard Line Tracking:** Smooth PID tracking using the 9-channel array.
 - [x] **2. Intersection & Tag Alignment:** Navigates the base junctions, skips Tag A to save time, and stops over Tag B to request the airlock door.

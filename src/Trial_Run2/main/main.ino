@@ -1,3 +1,5 @@
+// main.ino - FSM-based robot controller with MQTT comms for the UCL Robotics Challenge
+// architecture: event-driven message handler + main loop running a state machine
 #include "config.h"
 #include "motion.h"
 #include "sensors.h"
@@ -29,10 +31,11 @@ int emitterOdd = 37; int emitterEven = 38;
 int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
-float Kp_line = 20.0; float Kd_line = 5.0; 
-float Kp_wall = 5.0; float wall_target = 130.0;
-float Kp_heading = 6.0; 
-int baseSpeed_6V = 440; int baseSpeed_7V = 514; 
+// control gains - all tuned experimentally on the arena surface
+float Kp_line = 20.0; float Kd_line = 5.0;   // line follow PD
+float Kp_wall = 5.0; float wall_target = 130.0; // wall follow P
+float Kp_heading = 6.0;                        // dead reckoning heading correction
+int baseSpeed_6V = 440; int baseSpeed_7V = 514; // 7V needed for ramp torque
 int turning_spd = 330;
 float lastError = 0;
 int obstacleThreshold = 100; 
@@ -46,7 +49,7 @@ RobotState lastLoggedState = (RobotState)-1;
 
 unsigned long missionStartTime = 0;
 bool missionActive = false;
-const unsigned long ABORT_TIME_MS = 240000; 
+const unsigned long ABORT_TIME_MS = 240000; // 4 min mission budget - forces return if exceeded
 
 int base_seq = 0;
 int baseTagCount = 0;
@@ -111,6 +114,7 @@ void sysLog(const char* message) {
 void tick1() { if (digitalRead(enc1A) == digitalRead(enc1B)) pos1++; else pos1--; }
 void tick2() { if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++; else pos2--; }
 
+// both the physical button AND wifi heartbeat must be active - dual interlock for safety
 bool robotEnabled() { return physical_enable && wifi_enable; }
 
 bool isRightIntersection() {
@@ -139,6 +143,8 @@ bool isRightIntersection() {
   return (rightActive >= 3 && totalActive >= 4);
 }
 
+// reads RFID tag and returns true only if it's a NEW tag (not the one we're sitting on)
+// this prevents re-triggering while the robot is still over the same tag
 bool readTagUID() {
   if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
     char tempTag[32] = "";
@@ -148,8 +154,9 @@ bool readTagUID() {
     }
     mfrc522.PICC_HaltA();
 
+    // duplicate suppression - don't re-process the tag we just read
     if (strcmp(tempTag, lastScannedTag) == 0) {
-      return false; 
+      return false;
     }
     
     stopMotors();
@@ -163,8 +170,10 @@ bool readTagUID() {
   return false;
 }
 
+// MQTT callback - handles all server messages (heartbeat, airlock replies, GPS updates)
+// filters out binary pings (6 or 21 byte packets) that the server sends as keepalives
 void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t length) {
-  if (length == 0 || length == 6 || length == 21) return; 
+  if (length == 0 || length == 6 || length == 21) return;
   
   char msg[256];
   if (length >= sizeof(msg)) length = sizeof(msg) - 1;
@@ -187,12 +196,13 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     sysLog("[NET] KILL SWITCH TRIGGERED");
   }
 
+  // emergency = solar flare warning, robot must return to base immediately (not just stop)
   if (strstr(msg, "type=emergency")) {
     sysLog("[NET] EMERGENCY WARNING - RETURNING TO BASE");
     if (currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE &&
         currentState != STATE_EXIT_WAIT_SERVER && currentState != STATE_AIRLOCK_WAIT_B &&
         currentState != STATE_AIRLOCK_B_DECLINE && currentState != STATE_DOCKED) {
-      lastScannedTag[0] = '\0';
+      lastScannedTag[0] = '\0'; // clear so we can re-read tags on the way back
       currentState = STATE_EXIT_SEQUENCE;
     }
   }
@@ -206,10 +216,12 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     if (strstr(msg, "airlock=B")) airlockBCleared = true;
   }
   
+  // server tells us if the soil is fertile AND gives us our grid position (like GPS)
   if ((currentState == STATE_WAIT_SERVER || currentState == STATE_EXIT_WAIT_SERVER) && strstr(msg, "type=isFertileReply")) {
     isFertileZone = strstr(msg, "fertile=true") != nullptr;
     waitingForServer = false;
-    
+
+    // extract x,y coordinates from the reply to update our position
     char* xLoc = strstr(msg, "x=");
     char* yLoc = strstr(msg, "y=");
     if (xLoc && yLoc) {
@@ -296,6 +308,8 @@ void setup() {
   mc.setPwmMode(1, 6); mc.setPwmMode(3, 6);
   mfrc522.PCD_Init();
 
+  // calibrate gyro bias at startup - robot must be stationary for this
+  // averages 200 readings to find the zero-offset (gyro drift compensation)
   if (imu.begin(0x68, &Wire1)) {
     imu.setGyroRange(MPU6050_RANGE_1000_DEG);
     float sum = 0;
@@ -317,7 +331,7 @@ void setup() {
   messenger.onMessage(onMessage);
   messenger.begin(WIFI_SSID, WIFI_PASSWORD, BROKER_HOST, BROKER_PORT, GROUP_ID, BoardId);
 
-  // FSM Topology Injection: Boots straight into Task 7/8 if button is held during power-on
+  // if revival button is held at boot, skip normal mission and go straight to rescue mode
   if (digitalRead(REVIVAL_BUTTON_PIN) == LOW) {
     currentState = STATE_REVIVE_TARGET;
     sysLog("[BOOT] MODE: TASK 7/8 (REVIVAL)");
@@ -376,6 +390,7 @@ void loop() {
   float pitch = getPitch();
 
   switch (currentState) {
+    // Task 1-2: navigate from start, scan RFID tag, request airlock, push through to ramp
     case STATE_BASE_NAV:
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 8) {
@@ -438,6 +453,7 @@ void loop() {
         }
       }
 
+      // detect ramp by sustained negative pitch - need 20+ readings to filter noise
       if (base_seq == 3) {
         Serial.print("Pitch:");
         Serial.println(pitch);
@@ -455,6 +471,7 @@ void loop() {
       }
       break;
 
+    // wall follow up the ramp using left lidar, higher voltage for torque on incline
     case STATE_RAMP_CLIMB:
       if (!executeWallFollow(baseSpeed_7V, 514, 1)) {
         setMotors(baseSpeed_7V, baseSpeed_7V, 514);
@@ -480,6 +497,7 @@ void loop() {
       } else flatGroundTime = 0;
       break;
 
+    // Task 3-5: follow lines in the arena, scan RFID tags, query server for fertility
     case STATE_ARENA_NAV: {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
@@ -530,6 +548,7 @@ void loop() {
       }
       break;
 
+    // Task 5: move forward to align over hole, rotate servo to drop seed
     case STATE_PLANT_SEED:
       snprintf(logBuf, sizeof(logBuf), "[ACTION] Planting Seed %d/%d.", seedsPlanted + 1, MAX_SEEDS);
       sysLog(logBuf);
@@ -548,6 +567,7 @@ void loop() {
       currentState = STATE_ARENA_NAV;
       break;
 
+    // Task 6: route back to airlock B at grid position (9,3) using GPS from server
     case STATE_EXIT_SEQUENCE: {
       if(currentX == 9 && currentY == 3) {
         stopMotors();
@@ -654,6 +674,7 @@ void loop() {
       }
       break;
 
+    // obstacle bypass: reverse, turn left 90, drive past it, turn right, find line again
     case STATE_OBSTACLE_AVOID: {
       setMotors(-300, -300, 440);
       unsigned long bTime = millis();
@@ -821,6 +842,7 @@ void loop() {
       break;
     }
 
+    // Task 7/8: approach stranded robot using ToF distance, push its front button
     case STATE_REVIVE_TARGET: {
       int clearance = getFrontClearanceMM();
       updateUI();
