@@ -33,7 +33,7 @@ To compile this code, the following libraries are required:
 
 ### Hardware Wiring & Power Notes
 * **Power:** We are running a 10.9V battery. To power the Arduino Giga R1 directly and prevent sensor brownouts, we created a solder bridge between the `VM` and `AVIN` pins on the Motoron shield. 
-* **Voltage Clamping:** Our N20 motors are rated for 6~7V. The `setMotors()` function mathematically clamps the PWM output to a maximum of 380 (~6V) for flat base navigation, and 550 (~7V) when extra torque is needed to scale the ramp incline.
+* **Voltage Clamping:** Our N20 motors are rated for 6~7V. The `setMotors()` function mathematically clamps the PWM output to a maximum of 440 (~6V) for flat base navigation, and 514 (~7V) when extra torque is needed to scale the ramp incline.
 
 ---
 
@@ -84,7 +84,7 @@ graph TD
 ```
 
 ### 2. Kill Switch & Emergency Handling
-Safety checks are evaluated before the FSM dictates motor control. This Subsumption architecture ensures zero lag between an emergency command and motor cessation.
+Safety checks are evaluated before the FSM dictates motor control. This Subsumption architecture ensures zero lag between a remote kill command and motor cessation, while autonomous emergency messages trigger an immediate Return-to-Base sequence.
 
 ```mermaid
 flowchart TD
@@ -93,12 +93,17 @@ flowchart TD
     HardwareCheck -->|Yes| ToggleHW[Toggle physical_enable]
     HardwareCheck -->|No| NetCheck[Check MQTT Msgs]
     
-    NetCheck --> ServerCheck{Msg == disable/emergency?}
-    ServerCheck -->|Yes| ToggleNet[wifi_enable = false]
-    ServerCheck -->|No| Eval{physical_enable && wifi_enable?}
+    NetCheck --> ServerKill{Msg == disable?}
+    ServerKill -->|Yes| ToggleNet[wifi_enable = false]
+    
+    ServerKill -->|No| ServerEmerg{Msg == emergency?}
+    ServerEmerg -->|Yes| TriggerExit[currentState = STATE_EXIT_SEQUENCE]
+    
+    ServerEmerg -->|No| Eval{physical_enable && wifi_enable?}
     
     ToggleHW --> Eval
     ToggleNet --> Eval
+    TriggerExit --> Eval
     
     Eval -->|False| Stop[stopMotors & delay]
     Eval -->|True| FSM[Execute Active FSM State]
@@ -107,26 +112,69 @@ flowchart TD
     FSM --> End
 ```
 
-### 3. Line Following & Topological Junction Logic
-This details the hybrid transition between pure reactive PID tracking and topological node routing used in the base and arena.
+### 3. Topological Finite State Machine (Trial #2 Sequence)
+This flowchart details the exact routing sequence used to navigate the base bifurcations, scale the ramp, and execute the 1.25m topological tracking requirement for Task 3.
 
 ```mermaid
-flowchart TD
-    Read[Read 9-Pin IR Array] --> CheckLine{Line Detected?}
-    CheckLine -->|Yes| PID[Execute PID Motor Control]
-    CheckLine -->|No| Inc[lostLineCount++]
+stateDiagram-v2
+    direction TB
+    classDef compound fill:#F3E5F5,stroke:#7B1FA2,stroke-width:2px;
     
-    PID --> End((Return))
+    [*] --> BootCheck
+
+    state BootCheck <<choice>>
+    BootCheck --> STATE_REVIVE_TARGET : Pin 46 LOW (Task 7/8)
+    BootCheck --> STATE_BASE_NAV : Normal Boot (Task 1-6)
+
+    state STATE_BASE_NAV {
+        direction TB
+        state "seq=0: Junction 1" as seq0
+        state "seq=1: Tag B Scanned" as seq1
+        state "seq=2: Right Junction" as seq2
+        state "seq=3: Ramp Approach" as seq3
+
+        [*] --> seq0
+        seq0 --> seq1 : Detect J1 -> Align & Turn Right (Skip Tag A)
+        seq1 --> seq2 : Seed GPS -> Request Airlock A -> Push 800 Ticks
+        seq2 --> seq3 : Detect Right Branch -> Align & Turn Right
+        seq3 --> [*] : Pitch < -10.0 deg
+    }
     
-    Inc --> CheckThresh{lostLineCount > 8/10?}
-    CheckThresh -->|No| End
-    CheckThresh -->|Yes| Branch{Current State / seq?}
+    STATE_BASE_NAV --> STATE_RAMP_CLIMB
+
+    state STATE_RAMP_CLIMB {
+        [*] --> WallFollow
+        WallFollow : 514 Speed, 7V Overvolt
+        WallFollow --> [*] : Pitch > -5.0 deg
+    }
     
-    Branch -->|Base Nav| Turn[Align & Execute Topo Turn]
-    Branch -->|Arena Nav| DR[Execute Dead Reckoning Fallback]
-    
-    Turn --> End
-    DR --> End
+    STATE_RAMP_CLIMB --> STATE_ARENA_NAV : Flat Ground Detected
+
+    state STATE_ARENA_NAV {
+        direction TB
+        state LineFollow : PID Tracking
+        state DeadReckon : Open Field Push (Task 4)
+        state NodeDecision <<choice>>
+
+        [*] --> LineFollow
+        LineFollow --> DeadReckon : lostLineCount > 10
+        DeadReckon --> LineFollow : Line Regained
+        LineFollow --> NodeDecision : RFID Tag Scanned
+        
+        NodeDecision --> LineFollow : arenaTagCount = 1
+        NodeDecision --> LineFollow : arenaTagCount = 2 (Execute Right Turn)
+        NodeDecision --> LineFollow : arenaTagCount = 3 (Execute Left Turn)
+    }
+
+    STATE_ARENA_NAV --> STATE_WAIT_SERVER : Fertility Request
+    STATE_WAIT_SERVER --> STATE_PLANT_SEED : isFertile = True & Seeds < 5
+    STATE_WAIT_SERVER --> STATE_ARENA_NAV : isFertile = False OR Seeds = 5
+    STATE_PLANT_SEED --> STATE_ARENA_NAV : Planting Complete
+
+    STATE_ARENA_NAV --> STATE_EXIT_SEQUENCE : currentXY == (9,3)
+    STATE_EXIT_SEQUENCE --> STATE_EXIT_DRIVE : Vector Calculated
+    STATE_EXIT_DRIVE --> STATE_DOCKED : Airlock B Cleared
+    STATE_DOCKED --> [*]
 ```
 
 ### 4. RFID Scanning & Planting Decision
@@ -160,7 +208,7 @@ Tuning this robot took a massive amount of physical trial and error to bridge th
 
 ### Sensor Tuning
 * **Line Sensor Thresholds:** We found that ambient room light gave our black line a value of ~800us and the floor ~400us. We set a hard software noise filter at `> 500us` to successfully calculate the center of mass without jitter.
-* **PID Tuning:** For Line Following: `Kp = 20.0`, `Kd = 5.0` (Smooth tracking at 380 PWM base speed).
+* **PID Tuning:** For Line Following: `Kp = 20.0`, `Kd = 5.0` (Smooth tracking at 440 PWM base speed).
 * **ToF Noise Filtering:** A single pixel firing a false positive would permanently freeze the robot. We implemented an array check targeting the middle horizontal band (indices 4-11 on a 4x4 resolution matrix) and capped the polling frequency at 60Hz to prevent I2C bus buffer overruns.
 
 ### What Didn't Work (And How We Fixed It)
