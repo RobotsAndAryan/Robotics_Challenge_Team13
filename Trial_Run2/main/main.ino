@@ -32,8 +32,8 @@ int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40};
 float Kp_line = 20.0; float Kd_line = 5.0; 
 float Kp_wall = 5.0; float wall_target = 130.0;
 float Kp_heading = 6.0; 
-int baseSpeed_6V = 380; int baseSpeed_7V = 550; 
-int turning_spd = 480;
+int baseSpeed_6V = 440; int baseSpeed_7V = 514; 
+int turning_spd = 330;
 float lastError = 0;
 int obstacleThreshold = 100; 
 int lostLineCount = 0;
@@ -50,6 +50,8 @@ const unsigned long ABORT_TIME_MS = 240000;
 
 int base_seq = 0; 
 int baseTagCount = 0;
+int arenaTagCount = 0; 
+
 bool entryCleared = false;
 bool airlockCleared = false;
 bool airlockBCleared = false;
@@ -58,6 +60,7 @@ bool isFertileZone = false;
 unsigned long serverWaitStartTime = 0;
 unsigned long flatGroundTime = 0;
 char currentTag[32] = "";
+char lastScannedTag[32] = ""; 
 
 struct ArenaNode {
   char uid[32];
@@ -108,7 +111,7 @@ void tick2() { if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++; else pos2--
 
 bool robotEnabled() { return physical_enable && wifi_enable; }
 
-bool isIntersection() {
+bool isRightIntersection() {
   uint16_t lineVals[9];
   for(int i=0; i<9; i++) { pinMode(linePins[i], OUTPUT); digitalWrite(linePins[i], HIGH); }
   delayMicroseconds(15);
@@ -121,25 +124,37 @@ bool isIntersection() {
     }
   }
   
-  int activeCount = 0;
-  for(int i=0; i<9; i++) {
-    if(lineVals[i] > 500) activeCount++;
+  int rightActive = 0;
+  for(int i=0; i<=3; i++) {
+    if(lineVals[i] > 500) rightActive++;
   }
-  return (activeCount >= 5);
+  
+  int totalActive = 0;
+  for(int i=0; i<9; i++) {
+    if(lineVals[i] > 500) totalActive++;
+  }
+  
+  return (rightActive >= 3 && totalActive >= 4);
 }
 
-// FIX: Added direct logging so you NEVER have to guess if the reader is working
 bool readTagUID() {
   if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
-    stopMotors();
-    strcpy(currentTag, "");
+    char tempTag[32] = "";
     for (byte i = 0; i < mfrc522.uid.size; i++) {
       char hex[4]; snprintf(hex, sizeof(hex), "%02X", mfrc522.uid.uidByte[i]);
-      strcat(currentTag, hex);
+      strcat(tempTag, hex);
     }
     mfrc522.PICC_HaltA();
+
+    if (strcmp(tempTag, lastScannedTag) == 0) {
+      return false; 
+    }
     
-    snprintf(logBuf, sizeof(logBuf), "[RFID] Scanned: %s", currentTag);
+    stopMotors();
+    strcpy(currentTag, tempTag);
+    strcpy(lastScannedTag, currentTag);
+    
+    snprintf(logBuf, sizeof(logBuf), "[RFID] %s", currentTag);
     sysLog(logBuf);
     return true;
   }
@@ -157,11 +172,11 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   if (strstr(msg, "type=heartbeat")) {
     if (strstr(msg, "enable=1") && !wifi_enable) {
       wifi_enable = true;
-      sysLog("[NET] Robot ENABLED");
+      sysLog("[NET] ENABLED");
     }
     else if (strstr(msg, "enable=0") && wifi_enable) {
       wifi_enable = false;
-      sysLog("[NET] Robot DISABLED");
+      sysLog("[NET] DISABLED");
     }
   }
   
@@ -280,7 +295,6 @@ void setup() {
     z_bias = sum / 200.0;
   }
   
-  // FIX: Sensor hardware limit is 60Hz. Setting to 100Hz causes I2C buffer overruns.
   if (myToF.begin(0x29, Wire2)) { 
     myToF.setResolution(4 * 4); 
     myToF.setRangingFrequency(60); 
@@ -291,6 +305,15 @@ void setup() {
   randomSeed(analogRead(0));
   messenger.onMessage(onMessage);
   messenger.begin(WIFI_SSID, WIFI_PASSWORD, BROKER_HOST, BROKER_PORT, GROUP_ID, BoardId);
+
+  // FSM Topology Injection: Boots straight into Task 7/8 if button is held during power-on
+  if (digitalRead(REVIVAL_BUTTON_PIN) == LOW) {
+    currentState = STATE_REVIVE_TARGET;
+    sysLog("[BOOT] MODE: TASK 7/8 (REVIVAL)");
+  } else {
+    currentState = STATE_BASE_NAV;
+    sysLog("[BOOT] MODE: TASKS 1-6 (FULL SEQUENCE)");
+  }
 }
 
 void checkGlobalAbort() {
@@ -313,7 +336,7 @@ void loop() {
   }
 
   if (currentState != lastLoggedState) {
-    snprintf(logBuf, sizeof(logBuf), "[FSM] %s -> %s", getStateName(lastLoggedState), getStateName(currentState));
+    snprintf(logBuf, sizeof(logBuf), "[FSM] %s", getStateName(currentState));
     sysLog(logBuf);
     lastLoggedState = currentState;
   }
@@ -331,7 +354,7 @@ void loop() {
     checkFrontObstacle();
     if (pathBlocked) {
       stopMotors();
-      sysLog("[EVENT] Obstacle - Bypass");
+      sysLog("[EVENT] Obstacle Detected - Engaging Bypass");
       returnState = currentState; 
       currentState = STATE_OBSTACLE_AVOID;
       return;
@@ -346,62 +369,61 @@ void loop() {
         if(++lostLineCount > 8) {
           stopMotors();
           if(base_seq == 0) {
-            sysLog("Junc 1: Turn Left");
-            turnAngle(120.0, true);
+            sysLog("[NAV] Junc 1: Aligning & Turning Right");
+            moveForwardTicks(300); 
+            turnAngle(120.0, false);
             base_seq = 1;
           } else if(base_seq == 2) {
-            sysLog("Junc 1 Return: Straight");
-            moveForwardTicks(400); 
-            base_seq = 3;
-          } else if(base_seq == 4) {
-            sysLog("Junc 2 Fallback: Turn Right");
+            sysLog("[NAV] Junc 2 Fallback: Turn Right");
             turnAngle(120.0, false);
-            base_seq = 5;
+            base_seq = 3;
           } else {
-            moveForwardTicks(500);
+            sysLog("[NAV] Track gap recovery push.");
+            moveForwardTicks(300);
           }
           lostLineCount = 0;
         }
       } else {
         lostLineCount = 0;
         
-        if (base_seq == 4) {
-          if (isIntersection()) {
+        if (base_seq == 2) {
+          if (isRightIntersection()) {
             stopMotors();
-            sysLog("Junc 2 (Line Int Detected): Turn Right");
-            moveForwardTicks(300); 
+            sysLog("[NAV] Junc 2 (Right Branch Detected): Aligning & Turning Right");
+            moveForwardTicks(350); 
             turnAngle(120.0, false); 
-            base_seq = 5;
+            base_seq = 3;
           }
         }
       }
 
-      // FIX: Decoupled Tag processing from base_seq to allow manual track testing
       if (readTagUID()) {
         baseTagCount++;
         
-        if(baseTagCount == 1) {
-          sysLog("[EVENT] Base Tag A Scanned");
-          sysLog("[NAV] Entry Granted. 180 flip.");
-          turnAngle(180.0, true);
-          base_seq = 2; // Keep sequence moving forward
-        } 
-        else if(baseTagCount == 2) {
-          sysLog("[EVENT] Base Tag B Scanned");
+        if(baseTagCount == 1) { 
+          sysLog("[EVENT] Base Tag B Scanned (Tag A Skipped)");
+          currentX = 9;
+          currentY = 7;
+          snprintf(logBuf, sizeof(logBuf), "[GPS] Base Seeded at (%d, %d)", currentX, currentY);
+          sysLog(logBuf);
+          
           char query[128]; snprintf(query, sizeof(query), "type=openAirlock airlock=A tag_id=%s board_id=%s", currentTag, BoardId);
           messenger.sendToBoard("server", query);
           airlockCleared = false;
           while(!airlockCleared) { updateUI(); delay(10); if(!robotEnabled()) return; }
           sysLog("[NAV] Airlock Open. Pushing through.");
           moveForwardTicks(800);
-          base_seq = 4; // Advance to Ramp right-turn search
+          base_seq = 2; 
         }
       }
 
-      if (base_seq == 5) {
+      if (base_seq == 3) {
+        Serial.print("Pitch:");
+        Serial.println(pitch);
         if (pitch < -10.0) {
           pitchUpCount++;
           if (pitchUpCount > 20) {
+            sysLog("[NAV] Ramp incline confirmed.");
             currentState = STATE_RAMP_CLIMB;
             pitchDownCount = 0;
             flatGroundTime = 0;
@@ -417,6 +439,7 @@ void loop() {
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
         else if (millis() - flatGroundTime > 3000) {
+          sysLog("[NAV] Ramp cleared. Entering Arena.");
           currentState = STATE_ARENA_NAV;
         }
       } else flatGroundTime = 0;
@@ -436,41 +459,34 @@ void loop() {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
           stopMotors();
-          int r = random(0, 3);
-          if(r==0) { turnAngle(90.0, true); globalHeading += 90.0; }
-          else if(r==1) { turnAngle(90.0, false); globalHeading -= 90.0; }
-          else moveForwardTicks(400);
-          normalizeHeading();
-          
-          sysLog("[NAV] Seeking track...");
-          setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-          unsigned long seekStart = millis();
-          while(!isLineDetected() && millis() - seekStart < 4000) {
-            updateUI();
-            checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
-            if(!robotEnabled()) { stopMotors(); return; }
-            checkFrontObstacle();
-            if(pathBlocked) {
-              stopMotors();
-              sysLog("[EVENT] Obstacle encountered during seek.");
-              returnState = currentState;
-              currentState = STATE_OBSTACLE_AVOID;
-              return;
-            }
-            delay(5);
-          }
-          stopMotors();
+          sysLog("[NAV] Line Lost. Executing Dead Reckoning Task 4 Fallback.");
+          moveStraightDeadReckoning(600);
           lostLineCount = 0;
         }
       } else lostLineCount = 0;
 
       if (readTagUID()) {
+        arenaTagCount++;
         bool known = false;
         for(int i=0; i<81; i++) {
           if (grid[i].known && strcmp(grid[i].uid, currentTag) == 0) { known = true; break; }
         }
+        
         char query[128]; snprintf(query, sizeof(query), "type=isFertile tag_id=%s board_id=%s", currentTag, BoardId);
         messenger.sendToBoard("server", query);
+        
+        if (arenaTagCount == 2) {
+            sysLog("[NAV] Task 3: Turn Right at Node 2.");
+            turnAngle(90.0, false);
+            globalHeading -= 90.0;
+            normalizeHeading();
+        } else if (arenaTagCount == 3) {
+            sysLog("[NAV] Task 3: Turn Left at Node 3.");
+            turnAngle(90.0, true);
+            globalHeading += 90.0;
+            normalizeHeading();
+        }
+
         waitingForServer = true; 
         serverWaitStartTime = millis();
         currentState = STATE_WAIT_SERVER;
@@ -482,12 +498,13 @@ void loop() {
       stopMotors();
       if (!waitingForServer) currentState = isFertileZone ? STATE_PLANT_SEED : STATE_ARENA_NAV;
       else if (millis() - serverWaitStartTime > 5000) {
-        sysLog("[ERROR] Server Timeout");
+        sysLog("[ERROR] Server Timeout.");
         currentState = STATE_ARENA_NAV;
       }
       break;
 
     case STATE_PLANT_SEED:
+      sysLog("[ACTION] Planting Seed.");
       moveForwardTicks(640);
       currentServoAngle += 40;
       if(currentServoAngle > 180) currentServoAngle = 0;
@@ -503,30 +520,35 @@ void loop() {
       break;
 
     case STATE_EXIT_SEQUENCE: {
-      if(currentX == 3 && currentY == 1) {
+      if(currentX == 9 && currentY == 3) {
         stopMotors();
+        sysLog("[EXIT] Target 9,3 Achieved. Requesting Airlock B.");
         char query[128]; snprintf(query, sizeof(query), "type=openAirlock airlock=B tag_id=%s board_id=%s", currentTag, BoardId);
         messenger.sendToBoard("server", query);
         currentState = STATE_AIRLOCK_WAIT_B;
         break;
       }
       if(currentX == -1 || currentY == -1) {
+        sysLog("[EXIT] GPS Unknown. Driving blindly to find a node.");
         currentState = STATE_EXIT_DRIVE;
         break;
       }
+      
       normalizeHeading();
       float desiredHeading = globalHeading;
       
-      if(currentX > 3) desiredHeading = 90.0;       
-      else if(currentX < 3) desiredHeading = 270.0; 
-      else if(currentY > 1) desiredHeading = 180.0; 
-      else if(currentY < 1) desiredHeading = 0.0;   
+      if(currentX > 9) desiredHeading = 90.0;       
+      else if(currentX < 9) desiredHeading = 270.0; 
+      else if(currentY > 3) desiredHeading = 180.0; 
+      else if(currentY < 3) desiredHeading = 0.0;   
 
       float diff = desiredHeading - globalHeading;
       if(diff > 180.0) diff -= 360.0;
       if(diff < -180.0) diff += 360.0;
 
       if(abs(diff) > 10.0) {
+        snprintf(logBuf, sizeof(logBuf), "[EXIT] Routing. Turn %d degrees.", (int)diff);
+        sysLog(logBuf);
         if(diff > 0) turnAngle(abs(diff), true);
         else turnAngle(abs(diff), false);
         globalHeading = desiredHeading;
@@ -563,6 +585,7 @@ void loop() {
     case STATE_AIRLOCK_WAIT_B:
       stopMotors();
       if (airlockBCleared) { 
+        sysLog("[NAV] Airlock B clear. Pushing in.");
         unsigned long time = millis();
         while(millis() - time < 8000) {
           executeLineFollow(baseSpeed_6V, 440);
@@ -589,7 +612,7 @@ void loop() {
     case STATE_DOCKED:
       stopMotors();
       if (flatGroundTime != 9999) {
-        sysLog("[MISSION COMPLETE] Docked.");
+        sysLog("[MISSION COMPLETE] Docked safely.");
         flatGroundTime = 9999; 
       }
       break;
@@ -600,6 +623,7 @@ void loop() {
       while(millis() - bTime < 600) { updateUI(); delay(1); }
       stopMotors();
 
+      sysLog("[AVOID] Turning 90 Left");
       turnAngle(90.0, true);  
       globalHeading += 90.0;
       normalizeHeading();         
@@ -658,6 +682,7 @@ void loop() {
       while(millis() - bTime < 800) { updateUI(); delay(1); }
       stopMotors();
 
+      sysLog("[AVOID] Clearance found. Turn Right.");
       turnAngle(90.0, false);   
       globalHeading -= 90.0;
       normalizeHeading();       
@@ -716,6 +741,7 @@ void loop() {
       while(millis() - bTime < 800) { updateUI(); delay(1); }
       stopMotors();
 
+      sysLog("[AVOID] Returning to track axis.");
       turnAngle(90.0, false);   
       globalHeading -= 90.0;
       normalizeHeading();       
@@ -742,6 +768,7 @@ void loop() {
       }
       stopMotors();
       
+      sysLog("[AVOID] Track re-acquired. Restoring heading.");
       turnAngle(90.0, true); 
       globalHeading += 90.0;
       normalizeHeading();          

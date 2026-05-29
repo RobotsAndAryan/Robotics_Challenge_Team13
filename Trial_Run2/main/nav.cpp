@@ -44,7 +44,7 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
       if(distL < 0) distL = 999;
 
       if (distL < 350) {
-        float wallError = wall_target - distL; 
+        float wallError = 65 - distL; 
         setMotors(bSpeed - (Kp_wall * wallError), bSpeed + (Kp_wall * wallError), maxPWM);
         return true;
       }
@@ -74,7 +74,7 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
       if(distR < 0) distR = 999;
 
       if (distR < 350) {
-        float wallError = wall_target - distR; 
+        float wallError = 65 - distR; 
         setMotors(bSpeed + (Kp_wall * wallError), bSpeed - (Kp_wall * wallError), maxPWM);
         return true;
       }
