@@ -52,7 +52,8 @@ extern volatile long pos1; extern volatile long pos2;
 
 extern int emitterOdd; extern int emitterEven;
 extern int linePins[9];
-extern int weights[9]; 
+extern int weights[9];
+extern char lastScannedTag[32];
 
 extern float Kp_line; extern float Kd_line; 
 extern float Kp_wall; extern float wall_target;
@@ -67,7 +68,6 @@ extern float z_bias;
 
 void tick1();
 void tick2();
-void toggleEnableISR();
 bool robotEnabled();
 void updateUI();
 void normalizeHeading();

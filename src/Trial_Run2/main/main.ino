@@ -48,9 +48,11 @@ unsigned long missionStartTime = 0;
 bool missionActive = false;
 const unsigned long ABORT_TIME_MS = 240000; 
 
-int base_seq = 0; 
+int base_seq = 0;
 int baseTagCount = 0;
-int arenaTagCount = 0; 
+int arenaTagCount = 0;
+int seedsPlanted = 0;
+const int MAX_SEEDS = 5;
 
 bool entryCleared = false;
 bool airlockCleared = false;
@@ -180,9 +182,19 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     }
   }
   
-  if (strstr(msg, "type=emergency") || strstr(msg, "type=disable")) {
+  if (strstr(msg, "type=disable")) {
     wifi_enable = false;
     sysLog("[NET] KILL SWITCH TRIGGERED");
+  }
+
+  if (strstr(msg, "type=emergency")) {
+    sysLog("[NET] EMERGENCY WARNING - RETURNING TO BASE");
+    if (currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE &&
+        currentState != STATE_EXIT_WAIT_SERVER && currentState != STATE_AIRLOCK_WAIT_B &&
+        currentState != STATE_AIRLOCK_B_DECLINE && currentState != STATE_DOCKED) {
+      lastScannedTag[0] = '\0';
+      currentState = STATE_EXIT_SEQUENCE;
+    }
   }
   
   if (currentState == STATE_BASE_NAV && strstr(msg, "entryReply") && strstr(msg, "accepted=true")) {
@@ -234,11 +246,10 @@ void updateUI() {
 
   static unsigned long lastBlink = 0;
   static bool ledOn = false;
+  digitalWrite(GREEN_LED_PIN, digitalRead(REVIVAL_BUTTON_PIN) == LOW ? HIGH : LOW);
   if (robotEnabled()) {
     digitalWrite(LED_PIN, HIGH);
-    digitalWrite(GREEN_LED_PIN, digitalRead(REVIVAL_BUTTON_PIN) == LOW ? HIGH : LOW);
   } else {
-    digitalWrite(GREEN_LED_PIN, LOW); 
     if (millis() - lastBlink >= 500) {
       lastBlink = millis();
       ledOn = !ledOn;
@@ -317,11 +328,12 @@ void setup() {
 }
 
 void checkGlobalAbort() {
-  if (missionActive && millis() - missionStartTime > ABORT_TIME_MS && 
-      currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE && 
+  if (missionActive && millis() - missionStartTime > ABORT_TIME_MS &&
+      currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE &&
       currentState != STATE_EXIT_WAIT_SERVER && currentState != STATE_AIRLOCK_WAIT_B &&
       currentState != STATE_AIRLOCK_B_DECLINE && currentState != STATE_DOCKED) {
     sysLog("[MISSION] TIMEOUT. ABORTING.");
+    lastScannedTag[0] = '\0';
     currentState = STATE_EXIT_SEQUENCE;
   }
 }
@@ -410,7 +422,16 @@ void loop() {
           char query[128]; snprintf(query, sizeof(query), "type=openAirlock airlock=A tag_id=%s board_id=%s", currentTag, BoardId);
           messenger.sendToBoard("server", query);
           airlockCleared = false;
-          while(!airlockCleared) { updateUI(); delay(10); if(!robotEnabled()) return; }
+          {
+            unsigned long airlockWaitStart = millis();
+            while(!airlockCleared && millis() - airlockWaitStart < 10000) {
+              updateUI(); delay(10);
+              if(!robotEnabled()) return;
+            }
+            if (!airlockCleared) {
+              sysLog("[WARN] Airlock A timeout. Proceeding anyway.");
+            }
+          }
           sysLog("[NAV] Airlock Open. Pushing through.");
           moveForwardTicks(800);
           base_seq = 2; 
@@ -435,7 +456,9 @@ void loop() {
       break;
 
     case STATE_RAMP_CLIMB:
-      executeWallFollow(baseSpeed_7V, 514, 1);
+      if (!executeWallFollow(baseSpeed_7V, 514, 1)) {
+        setMotors(baseSpeed_7V, baseSpeed_7V, 514);
+      }
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
         else if (millis() - flatGroundTime > 3000) {
@@ -446,7 +469,9 @@ void loop() {
       break;
 
     case STATE_RAMP_DECLINE:
-      executeWallFollow(baseSpeed_6V, 440, 3); 
+      if (!executeWallFollow(baseSpeed_6V, 440, 3)) {
+        setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+      }
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
         else if (millis() - flatGroundTime > 1500) {
@@ -467,14 +492,14 @@ void loop() {
 
       if (readTagUID()) {
         arenaTagCount++;
-        bool known = false;
-        for(int i=0; i<81; i++) {
-          if (grid[i].known && strcmp(grid[i].uid, currentTag) == 0) { known = true; break; }
-        }
-        
+
+        waitingForServer = true;
+        serverWaitStartTime = millis();
+        currentState = STATE_WAIT_SERVER;
+
         char query[128]; snprintf(query, sizeof(query), "type=isFertile tag_id=%s board_id=%s", currentTag, BoardId);
         messenger.sendToBoard("server", query);
-        
+
         if (arenaTagCount == 2) {
             sysLog("[NAV] Task 3: Turn Right at Node 2.");
             turnAngle(90.0, false);
@@ -486,31 +511,35 @@ void loop() {
             globalHeading += 90.0;
             normalizeHeading();
         }
-
-        waitingForServer = true; 
-        serverWaitStartTime = millis();
-        currentState = STATE_WAIT_SERVER;
       }
       break;
     }
 
     case STATE_WAIT_SERVER:
       stopMotors();
-      if (!waitingForServer) currentState = isFertileZone ? STATE_PLANT_SEED : STATE_ARENA_NAV;
-      else if (millis() - serverWaitStartTime > 5000) {
+      if (!waitingForServer) {
+        if (isFertileZone && seedsPlanted < MAX_SEEDS) {
+          currentState = STATE_PLANT_SEED;
+        } else {
+          if (isFertileZone && seedsPlanted >= MAX_SEEDS) sysLog("[WARN] Seeds exhausted. Skipping plant.");
+          currentState = STATE_ARENA_NAV;
+        }
+      } else if (millis() - serverWaitStartTime > 5000) {
         sysLog("[ERROR] Server Timeout.");
         currentState = STATE_ARENA_NAV;
       }
       break;
 
     case STATE_PLANT_SEED:
-      sysLog("[ACTION] Planting Seed.");
+      snprintf(logBuf, sizeof(logBuf), "[ACTION] Planting Seed %d/%d.", seedsPlanted + 1, MAX_SEEDS);
+      sysLog(logBuf);
       moveForwardTicks(640);
       currentServoAngle += 40;
-      if(currentServoAngle > 180) currentServoAngle = 0;
+      if(currentServoAngle > 180) currentServoAngle = 180;
       seedServo.write(currentServoAngle);
       for(int d=0; d<15; d++) { delay(100); updateUI(); }
-      
+      seedsPlanted++;
+
       {
         char notify[128]; snprintf(notify, sizeof(notify), "type=seedPlanted tag_id=%s board_id=%s", currentTag, BoardId);
         messenger.sendToBoard("server", notify);
@@ -582,9 +611,13 @@ void loop() {
       else if (millis() - serverWaitStartTime > 5000) currentState = STATE_EXIT_SEQUENCE;
       break;
 
-    case STATE_AIRLOCK_WAIT_B:
+    case STATE_AIRLOCK_WAIT_B: {
       stopMotors();
-      if (airlockBCleared) { 
+      static unsigned long airlockBWaitStart = 0;
+      if (airlockBWaitStart == 0) airlockBWaitStart = millis();
+
+      if (airlockBCleared || millis() - airlockBWaitStart > 15000) {
+        if (!airlockBCleared) sysLog("[WARN] Airlock B timeout. Proceeding.");
         sysLog("[NAV] Airlock B clear. Pushing in.");
         unsigned long time = millis();
         while(millis() - time < 8000) {
@@ -592,13 +625,17 @@ void loop() {
           updateUI();
           if(!robotEnabled()) break;
         }
+        airlockBWaitStart = 0;
         currentState = STATE_AIRLOCK_B_DECLINE;
         flatGroundTime = 0;
       }
       break;
+    }
 
     case STATE_AIRLOCK_B_DECLINE:
-      executeWallFollow(baseSpeed_6V, 440, 3);
+      if (!executeWallFollow(baseSpeed_6V, 440, 3)) {
+        setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+      }
       if (pitch < -8.0) {
         flatGroundTime = 0;
       } else if (abs(pitch) < 5.0) {
@@ -663,11 +700,13 @@ void loop() {
         globalHeading += 180.0;
         normalizeHeading();
         setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+        unsigned long trapSearch = millis();
         while (!isLineDetected()) {
           updateUI();
           checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
-          if(!robotEnabled()) return; 
-          delay(5); 
+          if(!robotEnabled()) return;
+          if(millis() - trapSearch > 5000) break;
+          delay(5);
         }
         stopMotors();
         turnAngle(90.0, true);
@@ -677,7 +716,7 @@ void loop() {
         currentState = returnState;
         break;
       }
-      
+
       bTime = millis();
       while(millis() - bTime < 800) { updateUI(); delay(1); }
       stopMotors();
@@ -722,11 +761,13 @@ void loop() {
         globalHeading += 180.0;
         normalizeHeading();
         setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-        while (!isLineDetected()) { 
-          updateUI(); 
+        unsigned long trapSearch2 = millis();
+        while (!isLineDetected()) {
+          updateUI();
           checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
-          if(!robotEnabled()) return; 
-          delay(5); 
+          if(!robotEnabled()) return;
+          if(millis() - trapSearch2 > 5000) break;
+          delay(5);
         }
         stopMotors();
         turnAngle(90.0, true);
@@ -736,21 +777,23 @@ void loop() {
         currentState = returnState;
         break;
       }
-      
+
       bTime = millis();
       while(millis() - bTime < 800) { updateUI(); delay(1); }
       stopMotors();
 
       sysLog("[AVOID] Returning to track axis.");
-      turnAngle(90.0, false);   
+      turnAngle(90.0, false);
       globalHeading -= 90.0;
-      normalizeHeading();       
-      
+      normalizeHeading();
+
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+      unsigned long lineSearchStart = millis();
       while (!isLineDetected()) {
         updateUI();
         checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
         if(!robotEnabled()) { stopMotors(); return; }
+        if(millis() - lineSearchStart > 5000) { sysLog("[AVOID] Line search timeout."); break; }
 
         checkFrontObstacle();
         if(pathBlocked) {
@@ -763,6 +806,7 @@ void loop() {
           globalHeading += 90.0;
           normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+          lineSearchStart = millis();
         }
         delay(5);
       }
@@ -780,8 +824,9 @@ void loop() {
     case STATE_REVIVE_TARGET: {
       int clearance = getFrontClearanceMM();
       updateUI();
-      
+
       if (clearance == 9999) {
+        setMotors(200, 200, 440);
         break;
       }
 
@@ -794,30 +839,34 @@ void loop() {
       } 
       else {
         sysLog("[RESCUE] Target Engaged. Applying pressure.");
-        stopMotors();
+        setMotors(150, 150, 440);
         unsigned long waitStart = millis();
-        while(millis() - waitStart < 5000) {
+        while(millis() - waitStart < 3000) {
           updateUI();
-          if(!robotEnabled()) return;
+          if(!robotEnabled()) { stopMotors(); return; }
           delay(10);
         }
-        
+        stopMotors();
+
         sysLog("[RESCUE] Reversing off target.");
         setMotors(-300, -300, 440);
         waitStart = millis();
-        while(millis() - waitStart < 1000) { updateUI(); if(!robotEnabled()) return; delay(1); }
-        
+        while(millis() - waitStart < 1200) { updateUI(); if(!robotEnabled()) { stopMotors(); return; } delay(1); }
+        stopMotors();
+
         sysLog("[RESCUE] Seeking track...");
-        while(!isLineDetected() && millis() - waitStart < 4000) {
-           updateUI(); 
-           if(!robotEnabled()) return; 
-           delay(5); 
+        setMotors(200, 200, 440);
+        unsigned long seekStart = millis();
+        while(!isLineDetected() && millis() - seekStart < 4000) {
+           updateUI();
+           if(!robotEnabled()) { stopMotors(); return; }
+           delay(5);
         }
         stopMotors();
-        
+
         if (isLineDetected()) sysLog("[RESCUE] Track acquired.");
         else sysLog("[RESCUE] Track not found. Resuming anyway.");
-        
+
         currentState = STATE_ARENA_NAV;
       }
       break;
