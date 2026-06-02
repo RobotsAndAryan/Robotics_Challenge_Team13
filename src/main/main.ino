@@ -1,3 +1,4 @@
+// main.ino - FSM-based tracked controller with CPU-mute turn safety
 #include "config.h"
 #include "motion.h"
 #include "sensors.h"
@@ -20,6 +21,7 @@ const int REVIVAL_BUTTON_PIN = 46;
 volatile bool physical_enable = true;   
 bool wifi_enable = false;      
 bool pathBlocked = false;
+volatile bool is_turning = false;
 
 int enc1A = 44; int enc1B = 45;
 int enc2A = 39; int enc2B = 40;
@@ -29,18 +31,17 @@ int emitterOdd = 37; int emitterEven = 38;
 int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
-float Kp_line = 20.0; float Kd_line = 5.0; 
-float Kp_wall = 30.0; float wall_target = 12.0; 
+float Kp_line = 10.0; float Kd_line = 12.0; 
+float Kp_wall = 12.0; float wall_target = 12.0; 
 float Kp_heading = 6.0;                        
-int baseSpeed_6V = 440; int baseSpeed_7V = 800; 
-int turning_spd = 440;
+int baseSpeed_6V = 380; int baseSpeed_7V = 800; 
+int turning_spd = 750; 
 float lastError = 0;
 int obstacleThreshold = 100; 
 int lostLineCount = 0;
 int currentServoAngle = 0;
 float z_bias = 0.0;
 
-// IMU Tracking Variables shifted to Global
 float dr_targetYaw = 0.0;
 float dr_currentYaw = 0.0;
 unsigned long dr_lastIMUTime = 0;
@@ -113,6 +114,12 @@ void sysLog(const char* message) {
   }
 }
 
+void executeTurn(float targetAngle, bool turnLeft) {
+  is_turning = true;
+  turnAngle(targetAngle, turnLeft);
+  is_turning = false;
+}
+
 void tick1() { if (digitalRead(enc1A) == digitalRead(enc1B)) pos1++; else pos1--; }
 void tick2() { if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++; else pos2--; }
 
@@ -132,16 +139,13 @@ bool isRightIntersection() {
   }
   
   int rightActive = 0;
-  for(int i=0; i<=3; i++) {
-    if(lineVals[i] > 500) rightActive++;
-  }
+  for(int i=0; i<=3; i++) { if(lineVals[i] > 500) rightActive++; }
+  bool centerActive = (lineVals[3] > 500 || lineVals[4] > 500 || lineVals[5] > 500);
   
   int totalActive = 0;
-  for(int i=0; i<9; i++) {
-    if(lineVals[i] > 500) totalActive++;
-  }
+  for(int i=0; i<9; i++) { if(lineVals[i] > 500) totalActive++; }
   
-  return (rightActive >= 3 && totalActive >= 4);
+  return (rightActive >= 3 && centerActive && totalActive >= 5);
 }
 
 bool isLeftIntersection() {
@@ -158,16 +162,13 @@ bool isLeftIntersection() {
   }
   
   int leftActive = 0;
-  for(int i=5; i<=8; i++) {
-    if(lineVals[i] > 500) leftActive++;
-  }
+  for(int i=5; i<=8; i++) { if(lineVals[i] > 500) leftActive++; }
+  bool centerActive = (lineVals[3] > 500 || lineVals[4] > 500 || lineVals[5] > 500);
   
   int totalActive = 0;
-  for(int i=0; i<9; i++) {
-    if(lineVals[i] > 500) totalActive++;
-  }
+  for(int i=0; i<9; i++) { if(lineVals[i] > 500) totalActive++; }
   
-  return (leftActive >= 3 && totalActive >= 4);
+  return (leftActive >= 3 && centerActive && totalActive >= 5);
 }
 
 bool isTJunction() {
@@ -183,11 +184,14 @@ bool isTJunction() {
     }
   }
 
+  bool leftEdge = (lineVals[0] > 500 || lineVals[1] > 500 || lineVals[2] > 500);
+  bool rightEdge = (lineVals[6] > 500 || lineVals[7] > 500 || lineVals[8] > 500);
+  bool centerActive = (lineVals[3] > 500 || lineVals[4] > 500 || lineVals[5] > 500);
+  
   int totalActive = 0;
-  for(int i=0; i<9; i++) {
-    if(lineVals[i] > 500) totalActive++;
-  }
-  return (totalActive >= 6);
+  for(int i=0; i<9; i++) { if(lineVals[i] > 500) totalActive++; }
+  
+  return (leftEdge && rightEdge && centerActive && totalActive >= 5);
 }
 
 bool readTagUID() {
@@ -206,6 +210,9 @@ bool readTagUID() {
     stopMotors();
     strcpy(currentTag, tempTag);
     strcpy(lastScannedTag, currentTag);
+    
+    lastError = 0.0;
+    lostLineCount = 0;
     
     snprintf(logBuf, sizeof(logBuf), "[RFID] %s", currentTag);
     sysLog(logBuf);
@@ -285,7 +292,9 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
 }
 
 void updateUI() {
-  messenger.loop();
+  if (!is_turning) {
+    messenger.loop();
+  }
 
   static unsigned long lastBtn = 0;
   if (digitalRead(BUTTON_PIN) == LOW && millis() - lastBtn > 300) {
@@ -372,7 +381,7 @@ void setup() {
     currentState = STATE_REVIVE_TARGET;
     sysLog("[BOOT] MODE: TASK 7/8 (REVIVAL)");
   } else {
-    currentState = STATE_BASE_NAV;
+    currentState = STATE_ARENA_NAV;
     sysLog("[BOOT] MODE: TASKS 1-6 (FULL SEQUENCE)");
   }
 }
@@ -417,7 +426,7 @@ void loop() {
     checkFrontObstacle();
     if (pathBlocked) {
       stopMotors();
-      sysLog("[EVENT] Obstacle Detected - Engaging Bypass");
+      sysLog("[EVENT] Obstacle Detected - Engaging Box Bypass");
       returnState = currentState; 
       currentState = STATE_OBSTACLE_AVOID;
       return;
@@ -429,17 +438,17 @@ void loop() {
   switch (currentState) {
     case STATE_BASE_NAV: {
       int navSpeed = (base_seq == 1 || base_seq == 3) ? baseSpeed_6V / 1.1 : baseSpeed_6V;
-      int navMax = (base_seq == 1 || base_seq == 3) ? 330 : 500;
+      int navMax = (base_seq == 1 || base_seq == 3) ? 440 : 500;
       
       if (!executeLineFollow(navSpeed, navMax)) {
-        if(++lostLineCount > 8) {
+        if(++lostLineCount > 25) {
           stopMotors();
           if (base_seq == 3) {
             sysLog("[NAV] Track gap. Pushing blind toward ramp.");
-            moveForwardTicks(300); 
+            moveStraightDeadReckoning(300); 
           } else {
             sysLog("[NAV] Track gap recovery push.");
-            moveForwardTicks(250);
+            moveForwardTicks(250); 
           }
           lostLineCount = 0;
         }
@@ -449,15 +458,15 @@ void loop() {
         if (base_seq == 0 && isTJunction()) {
           stopMotors();
           sysLog("[NAV] Junc 1: Aligning & Turning Left");
-          moveForwardTicks(300); 
-          turnAngle(90.0, true);
+          moveForwardTicks(450); 
+          executeTurn(90.0, true);
           base_seq = 1;
         }
         else if (base_seq == 2 && (isTJunction() || isLeftIntersection())) {
           stopMotors();
           sysLog("[NAV] Junc 2: Aligning & Turning Left");
-          moveForwardTicks(350); 
-          turnAngle(90.0, true); 
+          moveForwardTicks(450); 
+          executeTurn(90.0, true); 
           base_seq = 3;
         }
       }
@@ -522,7 +531,7 @@ void loop() {
 
     case STATE_ARENA_NAV: {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
-        if(++lostLineCount > 10) {
+        if(++lostLineCount > 15) {
           stopMotors();
           sysLog("[NAV] Line Lost. Transitioning to FSM Dead Reckoning.");
           dr_targetYaw = globalHeading; 
@@ -536,7 +545,6 @@ void loop() {
       if (readTagUID()) {
         arenaTagCount++;
 
-        // Arena GPS Seeding fixed to (9,3) when crossing Airlock A
         if (arenaTagCount == 1) {
           currentX = 9; currentY = 3;
           snprintf(logBuf, sizeof(logBuf), "[GPS] Entry Node Seeded at (%d, %d)", currentX, currentY);
@@ -552,12 +560,12 @@ void loop() {
 
         if (arenaTagCount == 3) {
             sysLog("[NAV] Task 3: Turn Right at Node 3.");
-            turnAngle(90.0, false);
+            executeTurn(90.0, false);
             globalHeading -= 90.0;
             normalizeHeading();
         } else if (arenaTagCount == 4) {
             sysLog("[NAV] Task 3: Turn Left at Node 4.");
-            turnAngle(90.0, true);
+            executeTurn(90.0, true);
             globalHeading += 90.0;
             normalizeHeading();
         }
@@ -600,12 +608,12 @@ void loop() {
 
         if (arenaTagCount == 3) {
             sysLog("[NAV] Task 4: Turn Right at Node 3.");
-            turnAngle(90.0, false);
+            executeTurn(90.0, false);
             globalHeading -= 90.0;
             normalizeHeading();
         } else if (arenaTagCount == 4) {
             sysLog("[NAV] Task 4: Turn Left at Node 4.");
-            turnAngle(90.0, true);
+            executeTurn(90.0, true);
             globalHeading += 90.0;
             normalizeHeading();
         }
@@ -620,11 +628,25 @@ void loop() {
           currentState = STATE_PLANT_SEED;
         } else {
           if (isFertileZone && seedsPlanted >= MAX_SEEDS) sysLog("[WARN] Seeds exhausted. Skipping plant.");
-          currentState = STATE_ARENA_NAV;
+          if (!isLineDetected()) {
+            dr_targetYaw = globalHeading;
+            dr_currentYaw = globalHeading;
+            dr_lastIMUTime = micros();
+            currentState = STATE_DEAD_RECKONING;
+          } else {
+            currentState = STATE_ARENA_NAV;
+          }
         }
       } else if (millis() - serverWaitStartTime > 5000) {
         sysLog("[ERROR] Server Timeout.");
-        currentState = STATE_ARENA_NAV;
+        if (!isLineDetected()) {
+            dr_targetYaw = globalHeading;
+            dr_currentYaw = globalHeading;
+            dr_lastIMUTime = micros();
+            currentState = STATE_DEAD_RECKONING;
+        } else {
+            currentState = STATE_ARENA_NAV;
+        }
       }
       break;
 
@@ -652,7 +674,14 @@ void loop() {
         messenger.sendToBoard("server", notify);
       }
       lastError = 0;
-      currentState = STATE_ARENA_NAV;
+      if (!isLineDetected()) {
+          dr_targetYaw = globalHeading;
+          dr_currentYaw = globalHeading;
+          dr_lastIMUTime = micros();
+          currentState = STATE_DEAD_RECKONING;
+      } else {
+          currentState = STATE_ARENA_NAV;
+      }
       break;
 
     case STATE_EXIT_SEQUENCE: {
@@ -685,8 +714,8 @@ void loop() {
       if(abs(diff) > 10.0) {
         snprintf(logBuf, sizeof(logBuf), "[EXIT] Routing. Turn %d degrees.", (int)diff);
         sysLog(logBuf);
-        if(diff > 0) turnAngle(abs(diff), true);
-        else turnAngle(abs(diff), false);
+        if(diff > 0) executeTurn(abs(diff), true);
+        else executeTurn(abs(diff), false);
         globalHeading = desiredHeading;
         normalizeHeading();
       }
@@ -696,7 +725,7 @@ void loop() {
 
     case STATE_EXIT_DRIVE: {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
-        if(++lostLineCount > 10) {
+        if(++lostLineCount > 15) {
           dr_targetYaw = globalHeading;
           dr_currentYaw = globalHeading;
           dr_lastIMUTime = micros();
@@ -767,15 +796,13 @@ void loop() {
     case STATE_OBSTACLE_AVOID: {
       float savedHeading = globalHeading;
       unsigned long avoidStartTime = millis();
-      long outwardDistance = 0; // NEW: Track lateral displacement
+      long outwardDistance = 0; 
 
-      // 1. Halt and Reverse slightly to clear the immediate collision zone
       setMotors(-300, -300, 440);
       unsigned long bTime = millis();
       while(millis() - bTime < 600) { updateUI(); delay(1); }
       stopMotors();
 
-      // 2. Scan to choose safest side
       int distL = getLidar(Wire, 0x10);
       int distR = getLidar(Wire1, 0x12);
       if(distL < 0) distL = 0; 
@@ -785,13 +812,11 @@ void loop() {
       snprintf(logBuf, sizeof(logBuf), "[AVOID] L:%d R:%d. Bypassing %s.", distL, distR, bypassLeft ? "LEFT" : "RIGHT");
       sysLog(logBuf);
 
-      // --- SUBSTATE 1: Turn outward 90 degrees ---
-      turnAngle(90.0, bypassLeft);
+      executeTurn(90.0, bypassLeft);
       globalHeading += bypassLeft ? 90.0 : -90.0;
       normalizeHeading();
 
-      // Drive outward safely utilizing LiDAR to clear, but recording Encoders for return
-      pos1 = 0; pos2 = 0; // Reset encoders to track displacement
+      pos1 = 0; pos2 = 0; 
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       unsigned long bypassStart = millis();
       bool wallTrap = false;
@@ -804,28 +829,27 @@ void loop() {
 
         checkFrontObstacle();
         if(pathBlocked) {
-          // If we hit a wall while moving outward, we are trapped. 
           stopMotors();
           setMotors(-300, -300, 440);
           bTime = millis();
           while(millis() - bTime < 600) { updateUI(); delay(1); }
           stopMotors();
-          turnAngle(90.0, bypassLeft); // Turn away
+          executeTurn(90.0, bypassLeft); 
           globalHeading += bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           bypassStart = millis();
-          pos1 = 0; pos2 = 0; // reset memory since we broke the straight line
+          pos1 = 0; pos2 = 0; 
         }
 
         int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
-        if(distSide > 0 && distSide > 400 && (millis() - bypassStart > 800)) break;
+        if(distSide > 0 && distSide > 40 && (millis() - bypassStart > 800)) break;
         if (millis() - bypassStart > 4000) { wallTrap = true; break; }
         delay(5);
       }
       
       stopMotors();
-      outwardDistance = (abs(pos1) + abs(pos2)) / 2; // RECORD EXACT LATERAL DISPLACEMENT
+      outwardDistance = (abs(pos1) + abs(pos2)) / 2; 
       
       if (wallTrap) {
         globalHeading = savedHeading;
@@ -838,9 +862,8 @@ void loop() {
       bTime = millis();
       while(millis() - bTime < 800) { updateUI(); delay(1); }
 
-      // --- SUBSTATE 2: Turn parallel to track ---
       sysLog("[AVOID] Object cleared. Turning parallel.");
-      turnAngle(90.0, !bypassLeft);
+      executeTurn(90.0, !bypassLeft);
       globalHeading += !bypassLeft ? 90.0 : -90.0;
       normalizeHeading();
 
@@ -861,7 +884,7 @@ void loop() {
           bTime = millis();
           while(millis() - bTime < 600) { updateUI(); delay(1); }
           stopMotors();
-          turnAngle(90.0, !bypassLeft); 
+          executeTurn(90.0, !bypassLeft); 
           globalHeading += !bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
@@ -887,13 +910,12 @@ void loop() {
       while(millis() - bTime < 800) { updateUI(); delay(1); }
       stopMotors();
 
-      // --- SUBSTATE 3: Turn inward to re-acquire the track ---
       sysLog("[AVOID] Returning to track axis using encoder memory.");
-      turnAngle(90.0, !bypassLeft);
+      executeTurn(90.0, !bypassLeft);
       globalHeading += !bypassLeft ? 90.0 : -90.0;
       normalizeHeading();
 
-      pos1 = 0; pos2 = 0; // Reset encoders for the inward return stroke
+      pos1 = 0; pos2 = 0; 
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       unsigned long lineSearchStart = millis();
       
@@ -906,13 +928,11 @@ void loop() {
 
         long currentInward = (abs(pos1) + abs(pos2)) / 2;
 
-        // Condition A: If we are on the grid, stop exactly when the line is detected.
         if (isLineDetected()) {
           sysLog("[AVOID] Track detected.");
           break;
         }
 
-        // Condition B: Failsafe / Open Field. Stop if we've traveled the outward distance + a 300 tick slip margin.
         if (currentInward > (outwardDistance + 300)) {
           sysLog("[AVOID] Reached target lateral displacement. Stopping search.");
           break;
@@ -925,7 +945,7 @@ void loop() {
           bTime = millis();
           while(millis() - bTime < 600) { updateUI(); delay(1); }
           stopMotors();
-          turnAngle(90.0, bypassLeft); 
+          executeTurn(90.0, bypassLeft); 
           globalHeading += bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
@@ -935,10 +955,9 @@ void loop() {
       }
       stopMotors();
 
-      // --- SUBSTATE 4: Track found (or displacement reached). Align to original heading ---
       sysLog("[AVOID] Restoring original heading.");
-      turnAngle(90.0, bypassLeft); 
-      globalHeading = savedHeading; // forcefully restore the math just to be safe
+      executeTurn(90.0, bypassLeft); 
+      globalHeading = savedHeading; 
       normalizeHeading();          
       pathBlocked = false;             
       currentState = returnState;      
