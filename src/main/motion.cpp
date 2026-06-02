@@ -2,6 +2,7 @@
 #include "config.h"
 #include "motion.h"
 #include "sensors.h"
+#include "nav.h"
 #include <Arduino.h>
 
 // clamps speeds to max_pwm and sends to motoron - negated because of our motor wiring
@@ -32,7 +33,7 @@ void turnAngle(float targetAngle, bool turnLeft) {
   int rSpeed = turnLeft ? turning_spd : -turning_spd;
 
   setMotors(lSpeed, rSpeed, 800);
-  float actualTarget = targetAngle - 12.0;
+  float actualTarget = targetAngle-0.0;
   unsigned long turnStart = millis();
 
   // integrate gyro Z until we've rotated enough (or 4s timeout as safety)
@@ -86,7 +87,6 @@ void moveStraightDeadReckoning(long targetTicks) {
     if(!robotEnabled()) { stopMotors(); return; }
     if(millis() - moveStart > 5000) { break; }
 
-    // check for obstacles even during dead reckoning
     checkFrontObstacle();
     if(pathBlocked) { stopMotors(); return; }
 
@@ -99,7 +99,6 @@ void moveStraightDeadReckoning(long targetTicks) {
     float gyroZ = (g.gyro.z - z_bias) * 57.2958;
     if(abs(gyroZ) > 1.0) currentYaw += gyroZ * dt;
 
-    // correct towards 0 yaw (i.e. keep going straight)
     float headingError = 0.0 - currentYaw;
     float correction = Kp_heading * headingError;
 
@@ -107,4 +106,39 @@ void moveStraightDeadReckoning(long targetTicks) {
     delay(2);
   }
   stopMotors();
+}
+
+bool driveToNextNode() {
+  long nodeSpacingTicks = 500;
+  pos1 = 0; pos2 = 0;
+  float currentYaw = 0;
+  unsigned long lastIMUTime = micros();
+  unsigned long moveStart = millis();
+
+  while(abs(pos1) < nodeSpacingTicks && abs(pos2) < nodeSpacingTicks) {
+    updateUI();
+    if(!robotEnabled()) { stopMotors(); return false; }
+    if(millis() - moveStart > 5000) break;
+
+    checkFrontObstacle();
+    if(pathBlocked) { stopMotors(); return false; }
+
+    if(isLineDetected()) { stopMotors(); return true; }
+
+    sensors_event_t a, g, t;
+    imu.getEvent(&a, &g, &t);
+    unsigned long now = micros();
+    float dt = (now - lastIMUTime) / 1000000.0;
+    lastIMUTime = now;
+
+    float gyroZ = (g.gyro.z - z_bias) * 57.2958;
+    if(abs(gyroZ) > 1.0) currentYaw += gyroZ * dt;
+
+    float headingError = 0.0 - currentYaw;
+    float correction = Kp_heading * headingError;
+    setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
+    delay(2);
+  }
+  stopMotors();
+  return false;
 }

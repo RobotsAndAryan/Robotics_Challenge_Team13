@@ -47,24 +47,38 @@ bool executeLineFollow(int bSpeed, int maxPWM) {
   return true;
 }
 
-// wall following with P-control on distance to wall
+// wall following with PID-control on distance to wall
 // mode 1: left wall only (used going UP ramp)
 // mode 2: both walls (unused currently)
 // mode 3: right wall only (used going DOWN ramp)
-// target offset is 65mm from wall - tuned so robot stays centred in tunnel
 bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
+  static float lastWallError = 0;
+  static float wallIntegral = 0;
+  float Kd_wall = 5.0;
+  float Ki_wall = 0.3;
+  float integralMax = 200.0;
+
   switch(mode){
     case 1:{
       int distL = getLidar(Wire, 0x10);
       if(distL < 0) distL = 999;
 
-      if (distL < 350) {
-        float wallError = 65 - distL;
-        setMotors(bSpeed - (Kp_wall * wallError), bSpeed + (Kp_wall * wallError), maxPWM);
+      if (distL < 35) {
+        float wallError = wall_target - distL;
+        float D = wallError - lastWallError;
+        wallIntegral += wallError;
+        if(wallIntegral > integralMax) wallIntegral = integralMax;
+        if(wallIntegral < -integralMax) wallIntegral = -integralMax;
+        lastWallError = wallError;
+        float correction = (Kp_wall * wallError) + (Ki_wall * wallIntegral) + (Kd_wall * D);
+        if(correction > bSpeed) correction = bSpeed;
+        if(correction < -bSpeed) correction = -bSpeed;
+        setMotors(bSpeed - correction, bSpeed + correction, maxPWM);
         return true;
       }
+      lastWallError = 0;
+      wallIntegral = 0;
       return false;
-      break;
     }
     case 2:{
       int distL = getLidar(Wire, 0x10);
@@ -72,29 +86,55 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
       if(distL < 0) distL = 999;
       if(distR < 0) distR = 999;
 
-      if (distL < 350) {
+      if (distL < 35) {
         float wallError = wall_target - distL;
-        setMotors(bSpeed - (Kp_wall * wallError), bSpeed + (Kp_wall * wallError), maxPWM);
+        float D = wallError - lastWallError;
+        wallIntegral += wallError;
+        if(wallIntegral > integralMax) wallIntegral = integralMax;
+        if(wallIntegral < -integralMax) wallIntegral = -integralMax;
+        lastWallError = wallError;
+        float correction = (Kp_wall * wallError) + (Ki_wall * wallIntegral) + (Kd_wall * D);
+        if(correction > bSpeed) correction = bSpeed;
+        if(correction < -bSpeed) correction = -bSpeed;
+        setMotors(bSpeed - correction, bSpeed + correction, maxPWM);
         return true;
-      } else if (distR < 350) {
+      } else if (distR < 35) {
         float wallError = wall_target - distR;
-        setMotors(bSpeed + (Kp_wall * wallError), bSpeed - (Kp_wall * wallError), maxPWM);
+        float D = wallError - lastWallError;
+        wallIntegral += wallError;
+        if(wallIntegral > integralMax) wallIntegral = integralMax;
+        if(wallIntegral < -integralMax) wallIntegral = -integralMax;
+        lastWallError = wallError;
+        float correction = (Kp_wall * wallError) + (Ki_wall * wallIntegral) + (Kd_wall * D);
+        if(correction > bSpeed) correction = bSpeed;
+        if(correction < -bSpeed) correction = -bSpeed;
+        setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
         return true;
       }
+      lastWallError = 0;
+      wallIntegral = 0;
       return false;
-      break;
     }
     case 3:{
       int distR = getLidar(Wire1, 0x12);
       if(distR < 0) distR = 999;
 
-      if (distR < 350) {
-        float wallError = 65 - distR;
-        setMotors(bSpeed + (Kp_wall * wallError), bSpeed - (Kp_wall * wallError), maxPWM);
+      if (distR < 35) {
+        float wallError = wall_target - distR;
+        float D = wallError - lastWallError;
+        wallIntegral += wallError;
+        if(wallIntegral > integralMax) wallIntegral = integralMax;
+        if(wallIntegral < -integralMax) wallIntegral = -integralMax;
+        lastWallError = wallError;
+        float correction = (Kp_wall * wallError) + (Ki_wall * wallIntegral) + (Kd_wall * D);
+        if(correction > bSpeed) correction = bSpeed;
+        if(correction < -bSpeed) correction = -bSpeed;
+        setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
         return true;
       }
+      lastWallError = 0;
+      wallIntegral = 0;
       return false;
-      break;
     }
   }
   return false;

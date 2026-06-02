@@ -49,10 +49,10 @@ int getFrontClearanceMM() {
   return 9999;
 }
 
-// pitch from accelerometer using atan2 - gives angle of incline/decline
+// roll from accelerometer using atan2 - gives angle of incline/decline
 // used to detect when we're on the ramp vs flat ground
 float getPitch() {
   sensors_event_t a, g, t;
   imu.getEvent(&a, &g, &t);
-  return atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 57.2958;
+  return atan2(-a.acceleration.y, sqrt(a.acceleration.x * a.acceleration.x + a.acceleration.z * a.acceleration.z)) * 57.2958;
 }

@@ -4,3 +4,4 @@ void stopMotors();
 void turnAngle(float targetAngle, bool turnLeft);
 void moveForwardTicks(long targetTicks);
 void moveStraightDeadReckoning(long targetTicks);
+bool driveToNextNode();

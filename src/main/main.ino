@@ -1,5 +1,3 @@
-// main.ino - FSM-based robot controller with MQTT comms for the UCL Robotics Challenge
-// architecture: event-driven message handler + main loop running a state machine
 #include "config.h"
 #include "motion.h"
 #include "sensors.h"
@@ -31,17 +29,21 @@ int emitterOdd = 37; int emitterEven = 38;
 int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
-// control gains - all tuned experimentally on the arena surface
-float Kp_line = 20.0; float Kd_line = 5.0;   // line follow PD
-float Kp_wall = 5.0; float wall_target = 130.0; // wall follow P
-float Kp_heading = 6.0;                        // dead reckoning heading correction
-int baseSpeed_6V = 440; int baseSpeed_7V = 514; // 7V needed for ramp torque
-int turning_spd = 330;
+float Kp_line = 20.0; float Kd_line = 5.0; 
+float Kp_wall = 30.0; float wall_target = 12.0; 
+float Kp_heading = 6.0;                        
+int baseSpeed_6V = 440; int baseSpeed_7V = 800; 
+int turning_spd = 440;
 float lastError = 0;
 int obstacleThreshold = 100; 
 int lostLineCount = 0;
 int currentServoAngle = 0;
 float z_bias = 0.0;
+
+// IMU Tracking Variables shifted to Global to prevent C++ Static Ghosting
+float dr_targetYaw = 0.0;
+float dr_currentYaw = 0.0;
+unsigned long dr_lastIMUTime = 0;
 
 RobotState currentState = START_STATE;
 RobotState returnState = START_STATE; 
@@ -49,7 +51,7 @@ RobotState lastLoggedState = (RobotState)-1;
 
 unsigned long missionStartTime = 0;
 bool missionActive = false;
-const unsigned long ABORT_TIME_MS = 240000; // 4 min mission budget - forces return if exceeded
+const unsigned long ABORT_TIME_MS = 240000; 
 
 int base_seq = 0;
 int baseTagCount = 0;
@@ -114,7 +116,6 @@ void sysLog(const char* message) {
 void tick1() { if (digitalRead(enc1A) == digitalRead(enc1B)) pos1++; else pos1--; }
 void tick2() { if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++; else pos2--; }
 
-// both the physical button AND wifi heartbeat must be active - dual interlock for safety
 bool robotEnabled() { return physical_enable && wifi_enable; }
 
 bool isRightIntersection() {
@@ -143,8 +144,52 @@ bool isRightIntersection() {
   return (rightActive >= 3 && totalActive >= 4);
 }
 
-// reads RFID tag and returns true only if it's a NEW tag (not the one we're sitting on)
-// this prevents re-triggering while the robot is still over the same tag
+bool isLeftIntersection() {
+  uint16_t lineVals[9];
+  for(int i=0; i<9; i++) { pinMode(linePins[i], OUTPUT); digitalWrite(linePins[i], HIGH); }
+  delayMicroseconds(15);
+  for(int i=0; i<9; i++) { pinMode(linePins[i], INPUT); lineVals[i] = 1000; }
+  
+  unsigned long st = micros();
+  while(micros() - st < 1000) {
+    for(int i=0; i<9; i++) {
+      if(lineVals[i] == 1000 && digitalRead(linePins[i]) == LOW) lineVals[i] = micros() - st;
+    }
+  }
+  
+  int leftActive = 0;
+  for(int i=5; i<=8; i++) {
+    if(lineVals[i] > 500) leftActive++;
+  }
+  
+  int totalActive = 0;
+  for(int i=0; i<9; i++) {
+    if(lineVals[i] > 500) totalActive++;
+  }
+  
+  return (leftActive >= 3 && totalActive >= 4);
+}
+
+bool isTJunction() {
+  uint16_t lineVals[9];
+  for(int i=0; i<9; i++) { pinMode(linePins[i], OUTPUT); digitalWrite(linePins[i], HIGH); }
+  delayMicroseconds(15);
+  for(int i=0; i<9; i++) { pinMode(linePins[i], INPUT); lineVals[i] = 1000; }
+
+  unsigned long st = micros();
+  while(micros() - st < 1000) {
+    for(int i=0; i<9; i++) {
+      if(lineVals[i] == 1000 && digitalRead(linePins[i]) == LOW) lineVals[i] = micros() - st;
+    }
+  }
+
+  int totalActive = 0;
+  for(int i=0; i<9; i++) {
+    if(lineVals[i] > 500) totalActive++;
+  }
+  return (totalActive >= 6);
+}
+
 bool readTagUID() {
   if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
     char tempTag[32] = "";
@@ -154,9 +199,8 @@ bool readTagUID() {
     }
     mfrc522.PICC_HaltA();
 
-    // duplicate suppression - don't re-process the tag we just read
     if (strcmp(tempTag, lastScannedTag) == 0) {
-      return false;
+      return false; 
     }
     
     stopMotors();
@@ -170,10 +214,8 @@ bool readTagUID() {
   return false;
 }
 
-// MQTT callback - handles all server messages (heartbeat, airlock replies, GPS updates)
-// filters out binary pings (6 or 21 byte packets) that the server sends as keepalives
 void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t length) {
-  if (length == 0 || length == 6 || length == 21) return;
+  if (length == 0 || length == 6 || length == 21) return; 
   
   char msg[256];
   if (length >= sizeof(msg)) length = sizeof(msg) - 1;
@@ -196,13 +238,12 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     sysLog("[NET] KILL SWITCH TRIGGERED");
   }
 
-  // emergency = solar flare warning, robot must return to base immediately (not just stop)
   if (strstr(msg, "type=emergency")) {
     sysLog("[NET] EMERGENCY WARNING - RETURNING TO BASE");
     if (currentState != STATE_EXIT_SEQUENCE && currentState != STATE_EXIT_DRIVE &&
         currentState != STATE_EXIT_WAIT_SERVER && currentState != STATE_AIRLOCK_WAIT_B &&
         currentState != STATE_AIRLOCK_B_DECLINE && currentState != STATE_DOCKED) {
-      lastScannedTag[0] = '\0'; // clear so we can re-read tags on the way back
+      lastScannedTag[0] = '\0'; 
       currentState = STATE_EXIT_SEQUENCE;
     }
   }
@@ -216,12 +257,10 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     if (strstr(msg, "airlock=B")) airlockBCleared = true;
   }
   
-  // server tells us if the soil is fertile AND gives us our grid position (like GPS)
   if ((currentState == STATE_WAIT_SERVER || currentState == STATE_EXIT_WAIT_SERVER) && strstr(msg, "type=isFertileReply")) {
     isFertileZone = strstr(msg, "fertile=true") != nullptr;
     waitingForServer = false;
-
-    // extract x,y coordinates from the reply to update our position
+    
     char* xLoc = strstr(msg, "x=");
     char* yLoc = strstr(msg, "y=");
     if (xLoc && yLoc) {
@@ -304,12 +343,10 @@ void setup() {
   seedServo.attach(5); seedServo.write(0);
 
   mc.setBus(&Wire1); mc.setAddress(0x10);
-  mc.reinitialize(); mc.clearResetFlag(); mc.disableCommandTimeout();
+  mc.reinitialize(); mc.clearResetFlag(); mc.setCommandTimeoutMilliseconds(500);
   mc.setPwmMode(1, 6); mc.setPwmMode(3, 6);
   mfrc522.PCD_Init();
 
-  // calibrate gyro bias at startup - robot must be stationary for this
-  // averages 200 readings to find the zero-offset (gyro drift compensation)
   if (imu.begin(0x68, &Wire1)) {
     imu.setGyroRange(MPU6050_RANGE_1000_DEG);
     float sum = 0;
@@ -331,7 +368,6 @@ void setup() {
   messenger.onMessage(onMessage);
   messenger.begin(WIFI_SSID, WIFI_PASSWORD, BROKER_HOST, BROKER_PORT, GROUP_ID, BoardId);
 
-  // if revival button is held at boot, skip normal mission and go straight to rescue mode
   if (digitalRead(REVIVAL_BUTTON_PIN) == LOW) {
     currentState = STATE_REVIVE_TARGET;
     sysLog("[BOOT] MODE: TASK 7/8 (REVIVAL)");
@@ -375,8 +411,10 @@ void loop() {
 
   checkGlobalAbort();
 
+  // Safety bypass disabled during ramp to prevent false triggers from the floor slope
   if (currentState != STATE_REVIVE_TARGET && currentState != STATE_OBSTACLE_AVOID && 
-      currentState != STATE_EXIT_SEQUENCE && currentState != STATE_DOCKED) {
+      currentState != STATE_EXIT_SEQUENCE && currentState != STATE_DOCKED &&
+      currentState != STATE_RAMP_CLIMB && currentState != STATE_RAMP_DECLINE) {
     checkFrontObstacle();
     if (pathBlocked) {
       stopMotors();
@@ -390,76 +428,62 @@ void loop() {
   float pitch = getPitch();
 
   switch (currentState) {
-    // Task 1-2: navigate from start, scan RFID tag, request airlock, push through to ramp
-    case STATE_BASE_NAV:
-      if (!executeLineFollow(baseSpeed_6V, 440)) {
+    case STATE_BASE_NAV: {
+      int navSpeed = (base_seq == 1 || base_seq == 3) ? baseSpeed_6V / 1.1 : baseSpeed_6V;
+      int navMax = (base_seq == 1 || base_seq == 3) ? 330 : 500;
+      
+      if (!executeLineFollow(navSpeed, navMax)) {
         if(++lostLineCount > 8) {
           stopMotors();
-          if(base_seq == 0) {
-            sysLog("[NAV] Junc 1: Aligning & Turning Right");
-            moveForwardTicks(300); 
-            turnAngle(120.0, false);
-            base_seq = 1;
-          } else if(base_seq == 2) {
-            sysLog("[NAV] Junc 2 Fallback: Turn Right");
-            turnAngle(120.0, false);
-            base_seq = 3;
+          if (base_seq == 3) {
+            sysLog("[NAV] Track gap. Pushing blind toward ramp.");
+            moveForwardTicks(300); // Small push, not a blocking loop
           } else {
             sysLog("[NAV] Track gap recovery push.");
-            moveForwardTicks(300);
+            moveForwardTicks(250);
           }
           lostLineCount = 0;
         }
       } else {
         lostLineCount = 0;
         
-        if (base_seq == 2) {
-          if (isRightIntersection()) {
-            stopMotors();
-            sysLog("[NAV] Junc 2 (Right Branch Detected): Aligning & Turning Right");
-            moveForwardTicks(350); 
-            turnAngle(120.0, false); 
-            base_seq = 3;
-          }
+        if (base_seq == 0 && isTJunction()) {
+          stopMotors();
+          sysLog("[NAV] Junc 1: Aligning & Turning Left");
+          moveForwardTicks(300); 
+          turnAngle(90.0, true);
+          base_seq = 1;
+        }
+        else if (base_seq == 2 && (isTJunction() || isLeftIntersection())) {
+          stopMotors();
+          sysLog("[NAV] Junc 2: Aligning & Turning Left");
+          moveForwardTicks(350); 
+          turnAngle(90.0, true); 
+          base_seq = 3;
         }
       }
 
-      if (readTagUID()) {
-        baseTagCount++;
-        
-        if(baseTagCount == 1) { 
-          sysLog("[EVENT] Base Tag B Scanned (Tag A Skipped)");
-          currentX = 9;
-          currentY = 7;
-          snprintf(logBuf, sizeof(logBuf), "[GPS] Base Seeded at (%d, %d)", currentX, currentY);
-          sysLog(logBuf);
-          
-          char query[128]; snprintf(query, sizeof(query), "type=openAirlock airlock=A tag_id=%s board_id=%s", currentTag, BoardId);
-          messenger.sendToBoard("server", query);
-          airlockCleared = false;
-          {
-            unsigned long airlockWaitStart = millis();
-            while(!airlockCleared && millis() - airlockWaitStart < 10000) {
-              updateUI(); delay(10);
-              if(!robotEnabled()) return;
-            }
-            if (!airlockCleared) {
-              sysLog("[WARN] Airlock A timeout. Proceeding anyway.");
-            }
+      if (base_seq == 1 && readTagUID()) {
+        sysLog("[EVENT] Tag Scanned. Requesting Airlock A.");
+        char query[128]; snprintf(query, sizeof(query), "type=openAirlock airlock=A tag_id=%s board_id=%s", currentTag, BoardId);
+        messenger.sendToBoard("server", query);
+        airlockCleared = false;
+        {
+          unsigned long airlockWaitStart = millis();
+          while(!airlockCleared && millis() - airlockWaitStart < 10000) {
+            updateUI(); delay(10);
+            if(!robotEnabled()) return;
           }
-          sysLog("[NAV] Airlock Open. Pushing through.");
-          moveForwardTicks(800);
-          base_seq = 2; 
         }
+        sysLog("[NAV] Airlock Open. Pushing through.");
+        moveForwardTicks(800);
+        base_seq = 2; 
       }
 
-      // detect ramp by sustained negative pitch - need 20+ readings to filter noise
       if (base_seq == 3) {
-        Serial.print("Pitch:");
-        Serial.println(pitch);
-        if (pitch < -10.0) {
+        if (pitch < -5.0) {
           pitchUpCount++;
-          if (pitchUpCount > 20) {
+          if (pitchUpCount > 5) {
             sysLog("[NAV] Ramp incline confirmed.");
             currentState = STATE_RAMP_CLIMB;
             pitchDownCount = 0;
@@ -470,15 +494,16 @@ void loop() {
         }
       }
       break;
+    }
 
-    // wall follow up the ramp using left lidar, higher voltage for torque on incline
     case STATE_RAMP_CLIMB:
-      if (!executeWallFollow(baseSpeed_7V, 514, 1)) {
-        setMotors(baseSpeed_7V, baseSpeed_7V, 514);
+      if (!executeWallFollow(baseSpeed_7V, 800, 1)) {
+        setMotors(baseSpeed_7V, baseSpeed_7V, 800); 
       }
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
-        else if (millis() - flatGroundTime > 3000) {
+        // Capped at 400ms. 3000ms at 100% duty cycle would launch it into a wall.
+        else if (millis() - flatGroundTime > 400) {
           sysLog("[NAV] Ramp cleared. Entering Arena.");
           currentState = STATE_ARENA_NAV;
         }
@@ -491,25 +516,34 @@ void loop() {
       }
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
-        else if (millis() - flatGroundTime > 1500) {
+        else if (millis() - flatGroundTime > 400) {
           currentState = STATE_ARENA_NAV;
         }
       } else flatGroundTime = 0;
       break;
 
-    // Task 3-5: follow lines in the arena, scan RFID tags, query server for fertility
     case STATE_ARENA_NAV: {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
           stopMotors();
-          sysLog("[NAV] Line Lost. Executing Dead Reckoning Task 4 Fallback.");
-          moveStraightDeadReckoning(600);
+          sysLog("[NAV] Line Lost. Transitioning to FSM Dead Reckoning.");
+          
+          // Secure the IMU state transition completely to avoid C++ ghost loops
+          dr_targetYaw = globalHeading; 
+          dr_currentYaw = globalHeading;
+          dr_lastIMUTime = micros();
+          
+          currentState = STATE_DEAD_RECKONING;
           lostLineCount = 0;
         }
       } else lostLineCount = 0;
 
       if (readTagUID()) {
         arenaTagCount++;
+
+        if (arenaTagCount == 1) {
+          currentX = 9; currentY = 3;
+        }
 
         waitingForServer = true;
         serverWaitStartTime = millis();
@@ -520,11 +554,62 @@ void loop() {
 
         if (arenaTagCount == 2) {
             sysLog("[NAV] Task 3: Turn Right at Node 2.");
-            turnAngle(90.0, false);
+            turnAngle(90.0, false); // Fixed back to orthogonal 90
             globalHeading -= 90.0;
             normalizeHeading();
         } else if (arenaTagCount == 3) {
             sysLog("[NAV] Task 3: Turn Left at Node 3.");
+            turnAngle(90.0, true);  // Fixed back to orthogonal 90
+            globalHeading += 90.0;
+            normalizeHeading();
+        }
+      }
+      break;
+    }
+
+    case STATE_DEAD_RECKONING: {
+      sensors_event_t a, g, t;
+      imu.getEvent(&a, &g, &t);
+      unsigned long now = micros();
+      if(dr_lastIMUTime == 0) dr_lastIMUTime = now;
+      float dt = (now - dr_lastIMUTime) / 1000000.0;
+      dr_lastIMUTime = now;
+
+      // Positive integration. CCW (left drift) increases currentYaw.
+      float gyroZ = (g.gyro.z - z_bias) * 57.2958;
+      if(abs(gyroZ) > 1.0) dr_currentYaw += gyroZ * dt; 
+
+      // Left drift -> currentYaw grows. Error shrinks. Left motor increases. 
+      // Corrects the robot exactly back to the center line.
+      float headingError = dr_targetYaw - dr_currentYaw;
+      float correction = Kp_heading * headingError;
+
+      setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
+
+      if (isLineDetected()) {
+        stopMotors();
+        sysLog("[NAV] Track re-acquired.");
+        dr_lastIMUTime = 0;
+        currentState = STATE_ARENA_NAV;
+      }
+      else if (readTagUID()) {
+        stopMotors();
+        dr_lastIMUTime = 0;
+        arenaTagCount++;
+        waitingForServer = true;
+        serverWaitStartTime = millis();
+        currentState = STATE_WAIT_SERVER;
+        
+        char query[128]; snprintf(query, sizeof(query), "type=isFertile tag_id=%s board_id=%s", currentTag, BoardId);
+        messenger.sendToBoard("server", query);
+
+        if (arenaTagCount == 2) {
+            sysLog("[NAV] Task 4: Turn Right at Node 2.");
+            turnAngle(90.0, false);
+            globalHeading -= 90.0;
+            normalizeHeading();
+        } else if (arenaTagCount == 3) {
+            sysLog("[NAV] Task 4: Turn Left at Node 3.");
             turnAngle(90.0, true);
             globalHeading += 90.0;
             normalizeHeading();
@@ -548,15 +633,23 @@ void loop() {
       }
       break;
 
-    // Task 5: move forward to align over hole, rotate servo to drop seed
     case STATE_PLANT_SEED:
       snprintf(logBuf, sizeof(logBuf), "[ACTION] Planting Seed %d/%d.", seedsPlanted + 1, MAX_SEEDS);
       sysLog(logBuf);
       moveForwardTicks(640);
-      currentServoAngle += 40;
-      if(currentServoAngle > 180) currentServoAngle = 180;
-      seedServo.write(currentServoAngle);
-      for(int d=0; d<15; d++) { delay(100); updateUI(); }
+      stopMotors();
+      delay(500);
+      {
+        int targetAngle = currentServoAngle + 45;
+        if(targetAngle > 180) targetAngle = 180;
+        while(currentServoAngle < targetAngle) {
+          currentServoAngle += 2;
+          if(currentServoAngle > targetAngle) currentServoAngle = targetAngle;
+          seedServo.write(currentServoAngle);
+          delay(30);
+        }
+      }
+      for(int d=0; d<10; d++) { delay(100); updateUI(); }
       seedsPlanted++;
 
       {
@@ -567,11 +660,10 @@ void loop() {
       currentState = STATE_ARENA_NAV;
       break;
 
-    // Task 6: route back to airlock B at grid position (9,3) using GPS from server
     case STATE_EXIT_SEQUENCE: {
-      if(currentX == 9 && currentY == 3) {
+      if(currentX == 9 && currentY == 7) {
         stopMotors();
-        sysLog("[EXIT] Target 9,3 Achieved. Requesting Airlock B.");
+        sysLog("[EXIT] Target 9,7 Achieved. Requesting Airlock B.");
         char query[128]; snprintf(query, sizeof(query), "type=openAirlock airlock=B tag_id=%s board_id=%s", currentTag, BoardId);
         messenger.sendToBoard("server", query);
         currentState = STATE_AIRLOCK_WAIT_B;
@@ -582,14 +674,14 @@ void loop() {
         currentState = STATE_EXIT_DRIVE;
         break;
       }
-      
+
       normalizeHeading();
       float desiredHeading = globalHeading;
-      
+
       if(currentX > 9) desiredHeading = 90.0;       
       else if(currentX < 9) desiredHeading = 270.0; 
-      else if(currentY > 3) desiredHeading = 180.0; 
-      else if(currentY < 3) desiredHeading = 0.0;   
+      else if(currentY > 7) desiredHeading = 180.0; 
+      else if(currentY < 7) desiredHeading = 0.0;   
 
       float diff = desiredHeading - globalHeading;
       if(diff > 180.0) diff -= 360.0;
@@ -610,7 +702,10 @@ void loop() {
     case STATE_EXIT_DRIVE: {
       if (!executeLineFollow(baseSpeed_6V, 440)) {
         if(++lostLineCount > 10) {
-          moveStraightDeadReckoning(400); 
+          dr_targetYaw = globalHeading;
+          dr_currentYaw = globalHeading;
+          dr_lastIMUTime = micros();
+          currentState = STATE_DEAD_RECKONING; 
           lostLineCount = 0;
         }
       } else lostLineCount = 0;
@@ -660,7 +755,7 @@ void loop() {
         flatGroundTime = 0;
       } else if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
-        else if (millis() - flatGroundTime > 2000) {
+        else if (millis() - flatGroundTime > 400) {
           currentState = STATE_DOCKED;
         }
       } else flatGroundTime = 0;
@@ -674,87 +769,29 @@ void loop() {
       }
       break;
 
-    // obstacle bypass: reverse, turn left 90, drive past it, turn right, find line again
     case STATE_OBSTACLE_AVOID: {
+      float savedHeading = globalHeading;
+      unsigned long avoidStartTime = millis();
+
       setMotors(-300, -300, 440);
       unsigned long bTime = millis();
       while(millis() - bTime < 600) { updateUI(); delay(1); }
       stopMotors();
 
       sysLog("[AVOID] Turning 90 Left");
-      turnAngle(90.0, true);  
+      turnAngle(90.0, true);
       globalHeading += 90.0;
-      normalizeHeading();         
-      
+      normalizeHeading();
+
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       unsigned long bypassStart = millis();
       bool wallTrap = false;
-      
+
       while(true) {
         updateUI();
         checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
         if(!robotEnabled()) { stopMotors(); return; }
-
-        checkFrontObstacle();
-        if(pathBlocked) {
-          stopMotors();
-          setMotors(-300, -300, 440);
-          bTime = millis();
-          while(millis() - bTime < 600) { updateUI(); delay(1); }
-          stopMotors();
-          turnAngle(90.0, true);
-          globalHeading += 90.0;
-          normalizeHeading();
-          setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-          bypassStart = millis(); 
-        }
-
-        int distR = getLidar(Wire1, 0x12);
-        if(distR > 0 && distR > 400 && (millis() - bypassStart > 800)) break;
-        if (millis() - bypassStart > 4000) { wallTrap = true; break; }
-        delay(5);
-      }
-      
-      if (wallTrap) {
-        stopMotors();
-        turnAngle(180.0, true);
-        globalHeading += 180.0;
-        normalizeHeading();
-        setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-        unsigned long trapSearch = millis();
-        while (!isLineDetected()) {
-          updateUI();
-          checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
-          if(!robotEnabled()) return;
-          if(millis() - trapSearch > 5000) break;
-          delay(5);
-        }
-        stopMotors();
-        turnAngle(90.0, true);
-        globalHeading += 90.0;
-        normalizeHeading();
-        pathBlocked = false;
-        currentState = returnState;
-        break;
-      }
-
-      bTime = millis();
-      while(millis() - bTime < 800) { updateUI(); delay(1); }
-      stopMotors();
-
-      sysLog("[AVOID] Clearance found. Turn Right.");
-      turnAngle(90.0, false);   
-      globalHeading -= 90.0;
-      normalizeHeading();       
-
-      setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-      bypassStart = millis();
-      wallTrap = false;
-      
-      while(true) {
-        updateUI();
-        checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
-        if(!robotEnabled()) { stopMotors(); return; }
+        if(millis() - avoidStartTime > 20000) { wallTrap = true; break; }
 
         checkFrontObstacle();
         if(pathBlocked) {
@@ -778,21 +815,55 @@ void loop() {
       
       if (wallTrap) {
         stopMotors();
-        turnAngle(180.0, true);
-        globalHeading += 180.0;
+        globalHeading = savedHeading;
         normalizeHeading();
-        setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-        unsigned long trapSearch2 = millis();
-        while (!isLineDetected()) {
-          updateUI();
-          checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
-          if(!robotEnabled()) return;
-          if(millis() - trapSearch2 > 5000) break;
-          delay(5);
+        pathBlocked = false;
+        currentState = returnState;
+        break;
+      }
+
+      bTime = millis();
+      while(millis() - bTime < 800) { updateUI(); delay(1); }
+      stopMotors();
+
+      sysLog("[AVOID] Clearance found. Turn Right.");
+      turnAngle(90.0, false);
+      globalHeading -= 90.0;
+      normalizeHeading();
+
+      setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+      bypassStart = millis();
+      wallTrap = false;
+
+      while(true) {
+        updateUI();
+        checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
+        if(!robotEnabled()) { stopMotors(); return; }
+        if(millis() - avoidStartTime > 20000) { wallTrap = true; break; }
+
+        checkFrontObstacle();
+        if(pathBlocked) {
+          stopMotors();
+          setMotors(-300, -300, 440);
+          bTime = millis();
+          while(millis() - bTime < 600) { updateUI(); delay(1); }
+          stopMotors();
+          turnAngle(90.0, true);
+          globalHeading += 90.0;
+          normalizeHeading();
+          setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+          bypassStart = millis();
         }
+
+        int distR = getLidar(Wire1, 0x12);
+        if(distR > 0 && distR > 400 && (millis() - bypassStart > 800)) break;
+        if (millis() - bypassStart > 4000) { wallTrap = true; break; }
+        delay(5);
+      }
+      
+      if (wallTrap) {
         stopMotors();
-        turnAngle(90.0, true);
-        globalHeading += 90.0;
+        globalHeading = savedHeading;
         normalizeHeading();
         pathBlocked = false;
         currentState = returnState;
@@ -815,6 +886,7 @@ void loop() {
         checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
         if(!robotEnabled()) { stopMotors(); return; }
         if(millis() - lineSearchStart > 5000) { sysLog("[AVOID] Line search timeout."); break; }
+        if(millis() - avoidStartTime > 20000) break;
 
         checkFrontObstacle();
         if(pathBlocked) {
@@ -832,18 +904,27 @@ void loop() {
         delay(5);
       }
       stopMotors();
-      
+
       sysLog("[AVOID] Track re-acquired. Restoring heading.");
-      turnAngle(90.0, true); 
-      globalHeading += 90.0;
-      normalizeHeading();          
-      pathBlocked = false;             
-      currentState = returnState;      
+      globalHeading = savedHeading;
+      normalizeHeading();
+      pathBlocked = false;
+      currentState = returnState;
       break;
     }
 
-    // Task 7/8: approach stranded robot using ToF distance, push its front button
     case STATE_REVIVE_TARGET: {
+      static unsigned long reviveStartTime = 0;
+      if (reviveStartTime == 0) reviveStartTime = millis();
+
+      if (millis() - reviveStartTime > 30000) {
+        sysLog("[RESCUE] Approach timeout. Aborting.");
+        stopMotors();
+        reviveStartTime = 0;
+        currentState = STATE_ARENA_NAV;
+        break;
+      }
+
       int clearance = getFrontClearanceMM();
       updateUI();
 
@@ -853,12 +934,12 @@ void loop() {
       }
 
       if (clearance > 150) {
-        setMotors(440, 440, 500); 
-      } 
+        setMotors(440, 440, 500);
+      }
       else if (clearance > 35) {
-        int approachSpeed = map(clearance, 35, 150, 180, 400); 
+        int approachSpeed = map(clearance, 35, 150, 180, 400);
         setMotors(approachSpeed, approachSpeed, 440);
-      } 
+      }
       else {
         sysLog("[RESCUE] Target Engaged. Applying pressure.");
         setMotors(150, 150, 440);
@@ -889,12 +970,14 @@ void loop() {
         if (isLineDetected()) sysLog("[RESCUE] Track acquired.");
         else sysLog("[RESCUE] Track not found. Resuming anyway.");
 
+        reviveStartTime = 0;
         currentState = STATE_ARENA_NAV;
       }
       break;
     }
 
-    case STATE_DEAD_RECKONING: 
+    default:
+      stopMotors();
       break;
   }
   
