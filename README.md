@@ -227,7 +227,7 @@ Getting the logic to match the physical real-world testing took a lot of trial a
 *This validates what our robot can actually do against the COMP0204 grading rubric.*
 
 - [x] **1. Standard Line Tracking:** Smooth PID tracking using the 9-channel array.
-- [x] **2. Intersection & Tag Alignment:** Navigates the base junctions, skips Tag A to save time, and stops over Tag B to request the airlock door.
+- [x] **2. Intersection & Tag Alignment:** Navigates the base junctions, skips Tag B to save time, and stops over Tag A to request the airlock door(for now).
 - [x] **3. Solid Grid Navigation:** Executes the exact 1.25m topological maneuver (Node 2 Right -> Node 3 Left) by counting tags.
 - [x] **4. Open-Field Dead Reckoning:** Bridges unlined gaps by using the IMU to drive perfectly straight when the line disappears.
 - [x] **5. Ramped Incline/Decline Control:** Uses the pitch angle to detect the ramp (`< -10.0` degrees) and increases motor PWM to climb it without stalling.
