@@ -1,4 +1,3 @@
-// nav.cpp - smooth line centroids and dampened wall tracing controls
 #include "config.h"
 #include "nav.h"
 #include "motion.h"
@@ -26,7 +25,6 @@ bool executeLineFollow(int bSpeed, int maxPWM) {
     }
   }
 
-  // FIX: Dynamic Sharp 90-Degree Corner Spin Recovery Loop
   if (den == 0) {
     int spinSpd = (bSpeed > 400) ? 350 : bSpeed; 
     if (lastError > 0) setMotors(spinSpd, -spinSpd, maxPWM);
@@ -46,15 +44,15 @@ bool executeLineFollow(int bSpeed, int maxPWM) {
 
 bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
   static float lastWallError = 0;
-  float kd_w = 25.0; // High derivative gain dampens mechanical tread oscillation
+  float kd_w = 25.0; 
   
   switch(mode){
     case 1:{
       int distL = getLidar(Wire, 0x10);
-      if(distL < 0) distL = 999;
+      if(distL <= 0 || distL > 900) distL = 999;
 
-      if (distL < 35) {
-        float wallError = wall_target - distL;
+      if (distL < 350) { 
+        float wallError = wall_target - distL; 
         float D = wallError - lastWallError;
         lastWallError = wallError;
         
@@ -63,22 +61,32 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
         if(correction > bSpeed * 0.5) correction = bSpeed * 0.5;
         if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
         
+        // FIX: Inverted motor logic. Left track must speed up to steer Right (away from left wall).
         setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
         return true;
       } else {
-        // Wall lost fallback: Drift gently left to re-engage surface footprint
-        setMotors(bSpeed - 80, bSpeed + 80, maxPWM);
+        // Wall lost fallback: Drift slightly left to safely re-acquire it.
+        setMotors(bSpeed - 60, bSpeed + 60, maxPWM);
         return false;
       }
     }
     case 2:{
       int distL = getLidar(Wire, 0x10);
       int distR = getLidar(Wire1, 0x12);
-      if(distL < 0) distL = 999;
-      if(distR < 0) distR = 999;
+      if(distL <= 0 || distL > 900) distL = 999;
+      if(distR <= 0 || distR > 900) distR = 999;
 
-      if (distL < 35) {
+      if (distL < 350) {
         float wallError = wall_target - distL;
+        float D = wallError - lastWallError;
+        lastWallError = wallError;
+        float correction = (Kp_wall * wallError) + (kd_w * D);
+        if(correction > bSpeed * 0.5) correction = bSpeed * 0.5;
+        if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
+        setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
+        return true;
+      } else if (distR < 350) {
+        float wallError = wall_target - distR;
         float D = wallError - lastWallError;
         lastWallError = wallError;
         float correction = (Kp_wall * wallError) + (kd_w * D);
@@ -86,35 +94,27 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
         if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
         setMotors(bSpeed - correction, bSpeed + correction, maxPWM);
         return true;
-      } else if (distR < 35) {
-        float wallError = wall_target - distR;
-        float D = wallError - lastWallError;
-        lastWallError = wallError;
-        float correction = (Kp_wall * wallError) + (kd_w * D);
-        if(correction > bSpeed * 0.5) correction = bSpeed * 0.5;
-        if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
-        setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
-        return true;
       }
       lastWallError = 0;
       return false;
     }
     case 3:{
       int distR = getLidar(Wire1, 0x12);
-      if(distR < 0) distR = 999;
+      if(distR <= 0 || distR > 900) distR = 999;
 
-      if (distR < 35) {
+      if (distR < 350) {
         float wallError = wall_target - distR;
         float D = wallError - lastWallError;
         lastWallError = wallError;
         float correction = (Kp_wall * wallError) + (kd_w * D);
         if(correction > bSpeed * 0.5) correction = bSpeed * 0.5;
         if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
-        setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
+        // FIX: Inverted motor logic. Right track must speed up to steer Left (away from right wall).
+        setMotors(bSpeed - correction, bSpeed + correction, maxPWM);
         return true;
       } else {
-        // Wall lost fallback: Drift gently right
-        setMotors(bSpeed + 80, bSpeed - 80, maxPWM);
+        // Wall lost fallback: Drift slightly right to safely re-acquire it.
+        setMotors(bSpeed + 60, bSpeed - 60, maxPWM);
         return false;
       }
     }
