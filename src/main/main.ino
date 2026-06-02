@@ -785,7 +785,7 @@ void loop() {
       snprintf(logBuf, sizeof(logBuf), "[AVOID] L:%d R:%d. Bypassing %s.", distL, distR, bypassLeft ? "LEFT" : "RIGHT");
       sysLog(logBuf);
 
-      // --- LEG 1: Turn outward 90 degrees ---
+      // --- SUBSTATE 1: Turn outward 90 degrees ---
       turnAngle(90.0, bypassLeft);
       globalHeading += bypassLeft ? 90.0 : -90.0;
       normalizeHeading();
@@ -838,7 +838,7 @@ void loop() {
       bTime = millis();
       while(millis() - bTime < 800) { updateUI(); delay(1); }
 
-      // --- LEG 2: Turn parallel to track ---
+      // --- SUBSTATE 2: Turn parallel to track ---
       sysLog("[AVOID] Object cleared. Turning parallel.");
       turnAngle(90.0, !bypassLeft);
       globalHeading += !bypassLeft ? 90.0 : -90.0;
@@ -887,7 +887,7 @@ void loop() {
       while(millis() - bTime < 800) { updateUI(); delay(1); }
       stopMotors();
 
-      // --- LEG 3: Turn inward to re-acquire the track ---
+      // --- SUBSTATE 3: Turn inward to re-acquire the track ---
       sysLog("[AVOID] Returning to track axis using encoder memory.");
       turnAngle(90.0, !bypassLeft);
       globalHeading += !bypassLeft ? 90.0 : -90.0;
@@ -935,7 +935,7 @@ void loop() {
       }
       stopMotors();
 
-      // --- LEG 4: Track found (or displacement reached). Align to original heading ---
+      // --- SUBSTATE 4: Track found (or displacement reached). Align to original heading ---
       sysLog("[AVOID] Restoring original heading.");
       turnAngle(90.0, bypassLeft); 
       globalHeading = savedHeading; // forcefully restore the math just to be safe
