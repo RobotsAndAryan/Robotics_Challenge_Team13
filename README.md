@@ -22,7 +22,7 @@ We separated our code into different files to keep the main loop clean and make 
 
 ---
 
-## 🛠️ Required Libraries & Hardware Setup
+## Required Libraries & Hardware Setup
 You'll need these libraries installed to compile our code:
 * `Motoron` (Pololu Motoron M3S550 Shield) -> **I2C1**
 * `Adafruit MPU6050` (IMU) -> **I2C1**
