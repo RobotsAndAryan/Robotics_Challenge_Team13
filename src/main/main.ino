@@ -574,7 +574,7 @@ void loop() {
       dr_lastIMUTime = now;
 
       float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-      if(abs(gyroZ) > 1.0) dr_currentYaw += gyroZ * dt; // NOTE: If the robot spins continuously, flip this to -= 
+      if(abs(gyroZ) > 1.0) dr_currentYaw += gyroZ * dt; 
 
       float headingError = dr_targetYaw - dr_currentYaw;
       float correction = Kp_heading * headingError;
@@ -767,17 +767,31 @@ void loop() {
     case STATE_OBSTACLE_AVOID: {
       float savedHeading = globalHeading;
       unsigned long avoidStartTime = millis();
+      long outwardDistance = 0; // NEW: Track lateral displacement
 
+      // 1. Halt and Reverse slightly to clear the immediate collision zone
       setMotors(-300, -300, 440);
       unsigned long bTime = millis();
       while(millis() - bTime < 600) { updateUI(); delay(1); }
       stopMotors();
 
-      sysLog("[AVOID] Turning 90 Left");
-      turnAngle(90.0, true);
-      globalHeading += 90.0;
+      // 2. Scan to choose safest side
+      int distL = getLidar(Wire, 0x10);
+      int distR = getLidar(Wire1, 0x12);
+      if(distL < 0) distL = 0; 
+      if(distR < 0) distR = 0;
+      bool bypassLeft = (distL >= distR); 
+      
+      snprintf(logBuf, sizeof(logBuf), "[AVOID] L:%d R:%d. Bypassing %s.", distL, distR, bypassLeft ? "LEFT" : "RIGHT");
+      sysLog(logBuf);
+
+      // --- LEG 1: Turn outward 90 degrees ---
+      turnAngle(90.0, bypassLeft);
+      globalHeading += bypassLeft ? 90.0 : -90.0;
       normalizeHeading();
 
+      // Drive outward safely utilizing LiDAR to clear, but recording Encoders for return
+      pos1 = 0; pos2 = 0; // Reset encoders to track displacement
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       unsigned long bypassStart = millis();
       bool wallTrap = false;
@@ -790,26 +804,30 @@ void loop() {
 
         checkFrontObstacle();
         if(pathBlocked) {
+          // If we hit a wall while moving outward, we are trapped. 
           stopMotors();
           setMotors(-300, -300, 440);
           bTime = millis();
           while(millis() - bTime < 600) { updateUI(); delay(1); }
           stopMotors();
-          turnAngle(90.0, true);
-          globalHeading += 90.0;
+          turnAngle(90.0, bypassLeft); // Turn away
+          globalHeading += bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           bypassStart = millis();
+          pos1 = 0; pos2 = 0; // reset memory since we broke the straight line
         }
 
-        int distR = getLidar(Wire1, 0x12);
-        if(distR > 0 && distR > 400 && (millis() - bypassStart > 800)) break;
+        int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
+        if(distSide > 0 && distSide > 400 && (millis() - bypassStart > 800)) break;
         if (millis() - bypassStart > 4000) { wallTrap = true; break; }
         delay(5);
       }
       
+      stopMotors();
+      outwardDistance = (abs(pos1) + abs(pos2)) / 2; // RECORD EXACT LATERAL DISPLACEMENT
+      
       if (wallTrap) {
-        stopMotors();
         globalHeading = savedHeading;
         normalizeHeading();
         pathBlocked = false;
@@ -819,11 +837,11 @@ void loop() {
 
       bTime = millis();
       while(millis() - bTime < 800) { updateUI(); delay(1); }
-      stopMotors();
 
-      sysLog("[AVOID] Clearance found. Turn Right.");
-      turnAngle(90.0, false);
-      globalHeading -= 90.0;
+      // --- LEG 2: Turn parallel to track ---
+      sysLog("[AVOID] Object cleared. Turning parallel.");
+      turnAngle(90.0, !bypassLeft);
+      globalHeading += !bypassLeft ? 90.0 : -90.0;
       normalizeHeading();
 
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
@@ -843,15 +861,15 @@ void loop() {
           bTime = millis();
           while(millis() - bTime < 600) { updateUI(); delay(1); }
           stopMotors();
-          turnAngle(90.0, true);
-          globalHeading += 90.0;
+          turnAngle(90.0, !bypassLeft); 
+          globalHeading += !bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           bypassStart = millis();
         }
 
-        int distR = getLidar(Wire1, 0x12);
-        if(distR > 0 && distR > 400 && (millis() - bypassStart > 800)) break;
+        int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
+        if(distSide > 0 && distSide > 400 && (millis() - bypassStart > 800)) break;
         if (millis() - bypassStart > 4000) { wallTrap = true; break; }
         delay(5);
       }
@@ -869,19 +887,36 @@ void loop() {
       while(millis() - bTime < 800) { updateUI(); delay(1); }
       stopMotors();
 
-      sysLog("[AVOID] Returning to track axis.");
-      turnAngle(90.0, false);
-      globalHeading -= 90.0;
+      // --- LEG 3: Turn inward to re-acquire the track ---
+      sysLog("[AVOID] Returning to track axis using encoder memory.");
+      turnAngle(90.0, !bypassLeft);
+      globalHeading += !bypassLeft ? 90.0 : -90.0;
       normalizeHeading();
 
+      pos1 = 0; pos2 = 0; // Reset encoders for the inward return stroke
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       unsigned long lineSearchStart = millis();
-      while (!isLineDetected()) {
+      
+      while (true) {
         updateUI();
         checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
         if(!robotEnabled()) { stopMotors(); return; }
-        if(millis() - lineSearchStart > 5000) { sysLog("[AVOID] Line search timeout."); break; }
+        if(millis() - lineSearchStart > 6000) { sysLog("[AVOID] Line search timeout."); break; }
         if(millis() - avoidStartTime > 20000) break;
+
+        long currentInward = (abs(pos1) + abs(pos2)) / 2;
+
+        // Condition A: If we are on the grid, stop exactly when the line is detected.
+        if (isLineDetected()) {
+          sysLog("[AVOID] Track detected.");
+          break;
+        }
+
+        // Condition B: Failsafe / Open Field. Stop if we've traveled the outward distance + a 300 tick slip margin.
+        if (currentInward > (outwardDistance + 300)) {
+          sysLog("[AVOID] Reached target lateral displacement. Stopping search.");
+          break;
+        }
 
         checkFrontObstacle();
         if(pathBlocked) {
@@ -890,8 +925,8 @@ void loop() {
           bTime = millis();
           while(millis() - bTime < 600) { updateUI(); delay(1); }
           stopMotors();
-          turnAngle(90.0, true);
-          globalHeading += 90.0;
+          turnAngle(90.0, bypassLeft); 
+          globalHeading += bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           lineSearchStart = millis();
@@ -900,11 +935,13 @@ void loop() {
       }
       stopMotors();
 
-      sysLog("[AVOID] Track re-acquired. Restoring heading.");
-      globalHeading = savedHeading;
-      normalizeHeading();
-      pathBlocked = false;
-      currentState = returnState;
+      // --- LEG 4: Track found (or displacement reached). Align to original heading ---
+      sysLog("[AVOID] Restoring original heading.");
+      turnAngle(90.0, bypassLeft); 
+      globalHeading = savedHeading; // forcefully restore the math just to be safe
+      normalizeHeading();          
+      pathBlocked = false;             
+      currentState = returnState;      
       break;
     }
 
