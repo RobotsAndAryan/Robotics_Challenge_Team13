@@ -1,4 +1,4 @@
-# COMP0204 Term 3 Robotics Challenge (2025-2026) 🤖
+# COMP0204 Term 3 Robotics Challenge (2025-2026) 
 **Team Number:** 13
 **Board ID:** Kayubo
 
@@ -37,7 +37,7 @@ You'll need these libraries installed to compile our code:
 
 ---
 
-## 🚀 How to Run It
+## How to Run It
 
 1. Clone this repo.
 2. Create a `secrets.h` file next to the `.ino` file and put in your WiFi and MQTT credentials.
@@ -49,7 +49,7 @@ You'll need these libraries installed to compile our code:
 
 ---
 
-## 🗺️ System Diagrams & Flowcharts
+## System Diagrams & Flowcharts
 
 ### 1. Software & Hardware Architecture
 We tried to keep the hardware reading separate from the motor writing. The sensors feed data to the control algorithms, which figure out the errors and send them to the FSM. The FSM then tells the motors what to do.
@@ -200,7 +200,7 @@ flowchart TD
 
 ---
 
-## 📊 Testing, Calibration & Bug Fixes
+## Testing, Calibration & Bug Fixes
 Getting the logic to match the physical real-world testing took a lot of trial and error. Here is what we calibrated and the main bugs we had to fix:
 
 ### Calibration
@@ -223,7 +223,7 @@ Getting the logic to match the physical real-world testing took a lot of trial a
 
 ---
 
-## 🏆 Trial #2 Checklist
+## Trial #2 Checklist
 *This validates what our robot can actually do against the COMP0204 grading rubric.*
 
 - [x] **1. Standard Line Tracking:** Smooth PID tracking using the 9-channel array.
