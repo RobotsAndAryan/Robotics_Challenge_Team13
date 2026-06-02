@@ -8,7 +8,7 @@ For our navigation strategy, we quickly realized that just wandering around unti
 
 ---
 
-## 📂 Repository Structure
+## Repository Structure
 We separated our code into different files to keep the main loop clean and make it easier to debug specific parts of the hardware:
 
 * `main.ino` - The main loop. It checks the network, handles the safety kill switches, and runs the main FSM.
