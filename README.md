@@ -209,7 +209,7 @@ Getting the logic to match the physical real-world testing took a lot of trial a
 * **ToF Noise:** We had issues with the I2C bus getting overloaded when polling the ToF sensor too fast. We capped the ranging frequency to 60Hz and only read the middle horizontal band of pixels so a single bad reading wouldn't make the robot randomly stop.
 
 ### Major Bugs & How We Fixed Them
-**1. The "Double Scan" Bug**
+**1. Double scanning RFID**
 * **What happened:** Whenever the motors vibrated over an RFID tag, the tag would bounce slightly out of range of the antenna and back in. The MFRC522 reader thought it was a new tag and would scan it twice in a row. This completely messed up our `arenaTagCount` and made the robot execute its grid turns way too early.
 * **The fix:** We added a string comparison check (`strcmp`). We save the UID of the last tag we scanned, and if the "new" tag matches the previous one, the code just returns `false` and ignores it.
 
@@ -217,7 +217,7 @@ Getting the logic to match the physical real-world testing took a lot of trial a
 * **What happened:** Because our IR array is mounted at the very front of the chassis, it detects the T-Junctions before the wheels actually reach the intersection. When we triggered an immediate 90-degree turn, the robot would pivot off-center and completely lose the track.
 * **The fix:** We hardcoded a tiny blind push (`moveForwardTicks(300)`) right before any 90-degree turn. This pulls the wheel axis directly over the center of the line before it pivots.
 
-**3. Open Field Panic (Task 4)**
+**3. Line lost in open field**
 * **What happened:** If the robot lost the line, our old code would make it spin in place to try and find it again. This meant the robot couldn't handle the Open Field task, because it would just get stuck spinning in circles in the empty space.
 * **The fix:** We changed the logic so that if the line is completely lost for more than 10 frames (`lostLineCount > 10`), it totally ignores the PID loop and just pushes straight ahead (`moveStraightDeadReckoning`) using the IMU gyro to keep its heading until it finds the line on the other side.
 
