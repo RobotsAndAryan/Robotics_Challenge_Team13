@@ -21,7 +21,6 @@ volatile bool physical_enable = true;
 bool wifi_enable = false;      
 bool pathBlocked = false;
 
-// DYNAMIC NETWORK THROTTLE: Mutes the WiFi stack during IMU integration
 volatile bool is_turning = false;
 
 int enc1A = 44; int enc1B = 45;
@@ -33,17 +32,18 @@ int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
 float Kp_line = 20.0; float Kd_line = 5.0; 
-float Kp_wall = 30.0; float wall_target = 5.0; 
+// FIX: Kp_wall reduced to stop track oscillation. Target is 13 cm.
+float Kp_wall = 12.0; float wall_target = 13.0; 
 float Kp_heading = 6.0;                        
-int baseSpeed_6V = 440; int baseSpeed_7V = 800; 
-int turning_spd = 500; 
+int baseSpeed_6V = 440; int baseSpeed_7V = 650; 
+int turning_spd = 750; 
 float lastError = 0;
+// FIX: ToF distance is mm, so 100mm = 10cm trigger threshold
 int obstacleThreshold = 100; 
 int lostLineCount = 0;
 int currentServoAngle = 0;
 float z_bias = 0.0;
 
-// IMU Tracking Variables shifted to Global
 float dr_targetYaw = 0.0;
 float dr_currentYaw = 0.0;
 unsigned long dr_lastIMUTime = 0;
@@ -116,7 +116,6 @@ void sysLog(const char* message) {
   }
 }
 
-// FOOLPROOF WRAPPER: Ensures WiFi is mathematically locked out during IMU integration
 void executeTurn(float targetAngle, bool turnLeft) {
   is_turning = true;
   turnAngle(targetAngle, turnLeft);
@@ -416,7 +415,7 @@ void loop() {
     checkFrontObstacle();
     if (pathBlocked) {
       stopMotors();
-      sysLog("[EVENT] Obstacle Detected - Engaging Box Bypass");
+      sysLog("[EVENT] Obstacle Detected - Engaging Sequence Bypass");
       returnState = currentState; 
       currentState = STATE_OBSTACLE_AVOID;
       return;
@@ -429,61 +428,39 @@ void loop() {
     case STATE_BASE_NAV: {
       int navSpeed = (base_seq == 1 || base_seq == 3) ? baseSpeed_6V / 1.1 : baseSpeed_6V;
       int navMax = (base_seq == 1 || base_seq == 3) ? 440 : 500;
+      long currentDist = (abs(pos1) + abs(pos2)) / 2;
       
-      // FIX: Ramp gap FSM intervention. Stop swerving, drive straight.
-      if (base_seq == 3 && !isLineDetected()) {
-        sysLog("[NAV] Ramp gap detected. Dead reckoning to incline...");
-        dr_targetYaw = globalHeading; 
-        dr_currentYaw = globalHeading;
-        dr_lastIMUTime = micros();
-        unsigned long gapStart = millis();
-        
-        while (getPitch() >= -5.0) {
-            updateUI();
-            if(!robotEnabled() || (millis() - gapStart > 5000)) break; 
-            
-            sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
-            unsigned long now = micros(); float dt = (now - dr_lastIMUTime) / 1000000.0; dr_lastIMUTime = now;
-            float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-            if(abs(gyroZ) > 1.0) dr_currentYaw -= gyroZ * dt;
-            
-            float correction = Kp_heading * (dr_targetYaw - dr_currentYaw);
-            setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
-            delay(5);
-        }
-        stopMotors();
-        if (getPitch() < -5.0) {
-            sysLog("[NAV] Ramp incline confirmed.");
-            currentState = STATE_RAMP_CLIMB;
-            pitchDownCount = 0;
-            flatGroundTime = 0;
-        }
-        break; // Escape the state so FSM handles the RAMP_CLIMB transition
-      }
-
       if (!executeLineFollow(navSpeed, navMax)) {
         if(++lostLineCount > 25) {
           stopMotors();
-          sysLog("[NAV] Track gap recovery push.");
-          moveForwardTicks(250); 
+          if (base_seq == 3) {
+            sysLog("[NAV] Track gap. Pushing blind toward ramp.");
+            moveStraightDeadReckoning(300); 
+          } else {
+            sysLog("[NAV] Track gap recovery push.");
+            moveForwardTicks(250); 
+          }
           lostLineCount = 0;
         }
       } else {
         lostLineCount = 0;
         
-        if (base_seq == 0 && isTJunction()) {
+        // Mechanical Deadbands prevent false early triggers
+        if (base_seq == 0 && currentDist > 500 && isTJunction()) {
           stopMotors();
           sysLog("[NAV] Junc 1: Aligning & Turning Left");
           moveForwardTicks(450); 
           executeTurn(90.0, true);
           base_seq = 1;
+          pos1 = 0; pos2 = 0;
         }
-        else if (base_seq == 2 && (isTJunction() || isLeftIntersection())) {
+        else if (base_seq == 2 && currentDist > 800 && (isTJunction() || isLeftIntersection())) {
           stopMotors();
           sysLog("[NAV] Junc 2: Aligning & Turning Left");
           moveForwardTicks(450); 
           executeTurn(90.0, true); 
           base_seq = 3;
+          pos1 = 0; pos2 = 0;
         }
       }
 
@@ -502,6 +479,7 @@ void loop() {
         sysLog("[NAV] Airlock Open. Pushing through.");
         moveForwardTicks(800);
         base_seq = 2; 
+        pos1 = 0; pos2 = 0;
       }
 
       if (base_seq == 3) {
@@ -809,235 +787,212 @@ void loop() {
       }
       break;
 
+    // FIX: State-Machine Obstacle Avoidance to eliminate nested while-loop blocking
     case STATE_OBSTACLE_AVOID: {
-      float savedHeading = globalHeading;
-      long totalOutwardDistance = 0; 
-
-      // 1. Halt and Reverse slightly
-      setMotors(-300, -300, 440);
-      unsigned long bTime = millis();
-      while(millis() - bTime < 600) { updateUI(); delay(1); }
-      stopMotors();
-
-      // 2. Scan to choose safest side
-      int distL = getLidar(Wire, 0x10);
-      int distR = getLidar(Wire1, 0x12);
-      if(distL < 0) distL = 0; 
-      if(distR < 0) distR = 0;
-      bool bypassLeft = (distL >= distR); 
+      static int avoid_seq = 0;
+      static bool bypassLeft = false;
+      static long totalOutwardDistance = 0;
+      static unsigned long stateTimer = 0;
+      static int parallelPhase = 0;
+      static long clearTicks = 0;
+      static float savedHeading = 0.0;
       
-      snprintf(logBuf, sizeof(logBuf), "[AVOID] L:%d R:%d. Bypassing %s.", distL, distR, bypassLeft ? "LEFT" : "RIGHT");
-      sysLog(logBuf);
+      static float bypass_targetYaw = 0.0;
+      static float bypass_currentYaw = 0.0;
+      static unsigned long bypass_lastIMUTime = 0;
 
-      // --- LEG 1: Turn outward 90 degrees ---
-      executeTurn(90.0, bypassLeft);
-      globalHeading += bypassLeft ? 90.0 : -90.0;
-      normalizeHeading();
-
-      pos1 = 0; pos2 = 0; 
-      setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-      
-      float bypass_targetYaw = globalHeading;
-      float bypass_currentYaw = globalHeading;
-      unsigned long bypass_lastIMUTime = micros();
-
-      sysLog("[AVOID] Pushing outward guaranteed clearance.");
-      while(true) {
-        updateUI();
-        checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
-        if(!robotEnabled()) { stopMotors(); return; }
-
-        long currentOutward = (abs(pos1) + abs(pos2)) / 2;
-        // FIX: Hardcoded minimum 800 ticks outward to safely clear the physical corner of the tracks
-        if (currentOutward >= 800) {
-            totalOutwardDistance += currentOutward;
-            break;
-        }
-
-        checkFrontObstacle();
-        if(pathBlocked) {
-            totalOutwardDistance += currentOutward;
-            break; 
-        }
-
-        sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
-        unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
-        float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-        if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
-        float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
-        setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
-        delay(5);
-      }
-      stopMotors();
-      delay(300);
-
-      // --- LEG 2: Turn parallel to track and check LiDAR dynamically ---
-      sysLog("[AVOID] Outward cleared. Turning parallel.");
-      executeTurn(90.0, !bypassLeft);
-      globalHeading += !bypassLeft ? 90.0 : -90.0;
-      normalizeHeading();
-
-      pos1 = 0; pos2 = 0; 
-      bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
-      
-      int parallelPhase = 0; 
-      long clearTicks = 0;
-
-      while(true) {
-        updateUI();
-        checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
-        if(!robotEnabled()) { stopMotors(); return; }
-
-        long currentParallel = (abs(pos1) + abs(pos2)) / 2;
-
-        checkFrontObstacle();
-        if(pathBlocked) {
-          // FIX: Chained Obstacle Logic. Front ToF sees a new block. Break parallel, turn outward, push wider.
-          sysLog("[AVOID] Secondary obstacle ahead! Chaining bypass wider.");
-          stopMotors();
+      switch(avoid_seq) {
+        case 0: // Phase 0: Reverse and Evaluate
+          savedHeading = globalHeading;
+          totalOutwardDistance = 0;
           setMotors(-300, -300, 440);
-          bTime = millis();
-          while(millis() - bTime < 600) { updateUI(); delay(1); }
-          stopMotors();
+          stateTimer = millis();
+          avoid_seq = 1;
+          break;
           
-          executeTurn(90.0, bypassLeft); 
+        case 1: // Phase 1: Wait for reverse to finish and pick direction
+          if (millis() - stateTimer > 600) {
+            stopMotors();
+            int distL = getLidar(Wire, 0x10);
+            int distR = getLidar(Wire1, 0x12);
+            if(distL < 0) distL = 0; 
+            if(distR < 0) distR = 0;
+            bypassLeft = (distL >= distR); 
+            snprintf(logBuf, sizeof(logBuf), "[AVOID] L:%dcm R:%dcm. Bypassing %s.", distL, distR, bypassLeft ? "LEFT" : "RIGHT");
+            sysLog(logBuf);
+            avoid_seq = 2;
+          }
+          break;
+          
+        case 2: // Phase 2: Turn Outward
+          executeTurn(90.0, bypassLeft);
           globalHeading += bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
-          
           pos1 = 0; pos2 = 0;
-          bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
-          while(true) {
-              updateUI(); if(!robotEnabled()) { stopMotors(); return; }
-              long extraOut = (abs(pos1) + abs(pos2)) / 2;
-              
-              // Push an extra 600 ticks outward
-              if(extraOut >= 600) { totalOutwardDistance += extraOut; break; }
-              
-              checkFrontObstacle(); 
-              if(pathBlocked) { totalOutwardDistance += extraOut; break; }
-              
-              sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
-              unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
-              float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-              if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
-              float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
-              setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
-              delay(5);
+          bypass_targetYaw = globalHeading;
+          bypass_currentYaw = globalHeading;
+          bypass_lastIMUTime = micros();
+          setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+          avoid_seq = 3;
+          break;
+          
+        case 3: { // Phase 3: Drive Outward
+          long currentOutward = (abs(pos1) + abs(pos2)) / 2;
+          
+          if (currentOutward >= 800) {
+            totalOutwardDistance += currentOutward;
+            stopMotors();
+            stateTimer = millis(); // Small delay for mechanics to settle
+            avoid_seq = 4;
+            break;
           }
-          stopMotors(); delay(300);
-
-          executeTurn(90.0, !bypassLeft); 
-          globalHeading += !bypassLeft ? 90.0 : -90.0;
-          normalizeHeading();
-          bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
-          pos1 = 0; pos2 = 0;
-          parallelPhase = 0; 
-          continue; 
-        }
-
-        int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
-        
-        // FIX: Sequential LiDAR State Machine. Front LiDAR clears space -> hits block -> clears block -> Tail clearance delay.
-        if (parallelPhase == 0) {
-            if (distSide > 0 && distSide <= 40) {
-                parallelPhase = 1; 
-                sysLog("[AVOID] Parallel: Obstacle side detected.");
-            }
-        } 
-        else if (parallelPhase == 1) {
-            if (distSide > 40 || distSide < 0) {
-                parallelPhase = 2; 
-                clearTicks = currentParallel;
-                sysLog("[AVOID] Parallel: Sensor cleared obstacle. Pushing tail clearance.");
-            }
-        }
-        else if (parallelPhase == 2) {
-            // Wait 600 ticks AFTER the LiDAR clears the block so the back of the tracks don't hit it
-            if (currentParallel > (clearTicks + 600)) {
-                sysLog("[AVOID] Parallel: Tail clearance achieved.");
-                break; 
-            }
-        }
-
-        sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
-        unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
-        float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-        if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
-        float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
-        setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
-        
-        delay(5);
-      }
-      
-      stopMotors(); delay(300);
-
-      // --- LEG 3: Turn inward to re-acquire the track ---
-      sysLog("[AVOID] Returning to track axis using encoder memory.");
-      executeTurn(90.0, !bypassLeft);
-      globalHeading += !bypassLeft ? 90.0 : -90.0;
-      normalizeHeading();
-
-      pos1 = 0; pos2 = 0; 
-      bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
-      
-      while (true) {
-        updateUI();
-        checkGlobalAbort(); if(currentState == STATE_EXIT_SEQUENCE) return;
-        if(!robotEnabled()) { stopMotors(); return; }
-
-        long currentInward = (abs(pos1) + abs(pos2)) / 2;
-
-        if (isLineDetected()) break;
-        if (currentInward > (totalOutwardDistance + 300)) break; 
-
-        checkFrontObstacle();
-        if(pathBlocked) {
-          stopMotors();
-          setMotors(-300, -300, 440);
-          bTime = millis();
-          while(millis() - bTime < 600) { updateUI(); delay(1); }
-          stopMotors();
           
+          checkFrontObstacle();
+          if (pathBlocked) {
+            // Trapped moving outward! Failsafe abort.
+            totalOutwardDistance += currentOutward;
+            stopMotors();
+            sysLog("[AVOID] Trapped moving outward. Aborting bypass.");
+            globalHeading = savedHeading;
+            normalizeHeading();
+            pathBlocked = false;
+            currentState = returnState;
+            avoid_seq = 0;
+            break;
+          }
+          
+          // IMU Gyro Stabilization
+          sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
+          unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
+          float gyroZ = (g.gyro.z - z_bias) * 57.2958;
+          if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
+          float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
+          setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
+          break;
+        }
+        
+        case 4: // Phase 4: Settle & Turn Parallel
+          if (millis() - stateTimer > 300) {
+            sysLog("[AVOID] Outward cleared. Turning parallel.");
+            executeTurn(90.0, !bypassLeft);
+            globalHeading += !bypassLeft ? 90.0 : -90.0;
+            normalizeHeading();
+            pos1 = 0; pos2 = 0;
+            bypass_targetYaw = globalHeading;
+            bypass_currentYaw = globalHeading;
+            bypass_lastIMUTime = micros();
+            parallelPhase = 0;
+            setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+            avoid_seq = 5;
+          }
+          break;
+          
+        case 5: { // Phase 5: Drive Parallel (With Chaining & LiDAR Phase tracking)
+          long currentParallel = (abs(pos1) + abs(pos2)) / 2;
+          
+          checkFrontObstacle();
+          if (pathBlocked) {
+             sysLog("[AVOID] Secondary obstacle ahead! Chaining bypass wider.");
+             stopMotors();
+             avoid_seq = 2; // Jump back to Phase 2 (Turn Outward again!)
+             break;
+          }
+
+          // Sequential LiDAR phase tracking
+          int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
+          
+          if (parallelPhase == 0) {
+              if (distSide > 0 && distSide <= 40) { // Found the side of the block
+                  parallelPhase = 1; 
+                  sysLog("[AVOID] Parallel: Obstacle side detected.");
+              }
+          } 
+          else if (parallelPhase == 1) {
+              if (distSide > 40 || distSide <= 0) { // Block has ended
+                  parallelPhase = 2; 
+                  clearTicks = currentParallel;
+                  sysLog("[AVOID] Parallel: Sensor cleared obstacle. Pushing tail clearance.");
+              }
+          }
+          else if (parallelPhase == 2) {
+              // Wait for the physical length of the chassis to clear the block corner
+              if (currentParallel > (clearTicks + 600)) {
+                  sysLog("[AVOID] Parallel: Tail clearance achieved.");
+                  stopMotors();
+                  stateTimer = millis();
+                  avoid_seq = 6;
+                  break; 
+              }
+          }
+
+          sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
+          unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
+          float gyroZ = (g.gyro.z - z_bias) * 57.2958;
+          if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
+          float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
+          setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
+          break;
+        }
+        
+        case 6: // Phase 6: Settle & Turn Inward
+          if (millis() - stateTimer > 300) {
+            sysLog("[AVOID] Returning to track axis.");
+            executeTurn(90.0, !bypassLeft);
+            globalHeading += !bypassLeft ? 90.0 : -90.0;
+            normalizeHeading();
+            pos1 = 0; pos2 = 0;
+            bypass_targetYaw = globalHeading;
+            bypass_currentYaw = globalHeading;
+            bypass_lastIMUTime = micros();
+            setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+            avoid_seq = 7;
+          }
+          break;
+          
+        case 7: { // Phase 7: Drive Inward
+          long currentInward = (abs(pos1) + abs(pos2)) / 2;
+          
+          if (isLineDetected()) {
+             sysLog("[AVOID] Track detected.");
+             stopMotors();
+             avoid_seq = 8;
+             break;
+          }
+          if (currentInward > (totalOutwardDistance + 300)) {
+             sysLog("[AVOID] Reached target lateral displacement. Stopping search.");
+             stopMotors();
+             avoid_seq = 8;
+             break;
+          }
+          
+          checkFrontObstacle();
+          if (pathBlocked) {
+             sysLog("[AVOID] Blocked while returning! Forcing realignment.");
+             stopMotors();
+             avoid_seq = 8;
+             break;
+          }
+
+          sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
+          unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
+          float gyroZ = (g.gyro.z - z_bias) * 57.2958;
+          if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
+          float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
+          setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
+          break;
+        }
+        
+        case 8: // Phase 8: Final Alignment
+          sysLog("[AVOID] Restoring original heading.");
           executeTurn(90.0, bypassLeft); 
-          globalHeading += bypassLeft ? 90.0 : -90.0; normalizeHeading();
-          pos1 = 0; pos2 = 0; bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
-          
-          while(true) {
-              updateUI(); if(!robotEnabled()) return;
-              long escTicks = (abs(pos1)+abs(pos2))/2;
-              if(escTicks > 400) break;
-              sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
-              unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
-              float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-              if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
-              float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
-              setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
-              delay(5);
-          }
-          stopMotors(); delay(300);
-          executeTurn(90.0, !bypassLeft); 
-          globalHeading += !bypassLeft ? 90.0 : -90.0; normalizeHeading();
-          pos1 = 0; pos2 = 0; bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
-        }
-
-        sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
-        unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
-        float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-        if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
-        float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
-        setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
-        delay(5);
+          globalHeading = savedHeading; 
+          normalizeHeading();          
+          pathBlocked = false;             
+          currentState = returnState;
+          avoid_seq = 0; // Reset for next obstacle
+          break;
       }
-      stopMotors();
-
-      // --- LEG 4: Track found (or displacement reached). Align to original heading ---
-      sysLog("[AVOID] Restoring original heading.");
-      executeTurn(90.0, bypassLeft); 
-      globalHeading = savedHeading; 
-      normalizeHeading();          
-      pathBlocked = false;             
-      currentState = returnState;      
-      break;
+      break; 
     }
 
     case STATE_REVIVE_TARGET: {
