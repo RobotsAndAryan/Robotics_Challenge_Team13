@@ -1,4 +1,3 @@
-// main.ino - FSM-based tracked controller with CPU-mute turn safety
 #include "config.h"
 #include "motion.h"
 #include "sensors.h"
@@ -21,6 +20,8 @@ const int REVIVAL_BUTTON_PIN = 46;
 volatile bool physical_enable = true;   
 bool wifi_enable = false;      
 bool pathBlocked = false;
+
+// DYNAMIC NETWORK THROTTLE: Mutes the WiFi stack during IMU integration
 volatile bool is_turning = false;
 
 int enc1A = 44; int enc1B = 45;
@@ -31,17 +32,18 @@ int emitterOdd = 37; int emitterEven = 38;
 int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
-float Kp_line = 10.0; float Kd_line = 12.0; 
-float Kp_wall = 12.0; float wall_target = 12.0; 
+float Kp_line = 20.0; float Kd_line = 5.0; 
+float Kp_wall = 30.0; float wall_target = 12.0; 
 float Kp_heading = 6.0;                        
-int baseSpeed_6V = 380; int baseSpeed_7V = 800; 
-int turning_spd = 750; 
+int baseSpeed_6V = 440; int baseSpeed_7V = 800; 
+int turning_spd = 500; 
 float lastError = 0;
 int obstacleThreshold = 100; 
 int lostLineCount = 0;
 int currentServoAngle = 0;
 float z_bias = 0.0;
 
+// IMU Tracking Variables shifted to Global
 float dr_targetYaw = 0.0;
 float dr_currentYaw = 0.0;
 unsigned long dr_lastIMUTime = 0;
@@ -114,6 +116,7 @@ void sysLog(const char* message) {
   }
 }
 
+// FOOLPROOF WRAPPER: Ensures WiFi is mathematically locked out during IMU integration
 void executeTurn(float targetAngle, bool turnLeft) {
   is_turning = true;
   turnAngle(targetAngle, turnLeft);
@@ -125,6 +128,7 @@ void tick2() { if (digitalRead(enc2A) == digitalRead(enc2B)) pos2++; else pos2--
 
 bool robotEnabled() { return physical_enable && wifi_enable; }
 
+// FIX: STRICT Intersection Detectors to eliminate phantom corner swerves
 bool isRightIntersection() {
   uint16_t lineVals[9];
   for(int i=0; i<9; i++) { pinMode(linePins[i], OUTPUT); digitalWrite(linePins[i], HIGH); }
@@ -138,14 +142,11 @@ bool isRightIntersection() {
     }
   }
   
-  int rightActive = 0;
-  for(int i=0; i<=3; i++) { if(lineVals[i] > 500) rightActive++; }
+  bool rightEdge = (lineVals[0] > 500 && lineVals[1] > 500 && lineVals[2] > 500);
   bool centerActive = (lineVals[3] > 500 || lineVals[4] > 500 || lineVals[5] > 500);
+  bool leftClear = (lineVals[6] < 500 && lineVals[7] < 500);
   
-  int totalActive = 0;
-  for(int i=0; i<9; i++) { if(lineVals[i] > 500) totalActive++; }
-  
-  return (rightActive >= 3 && centerActive && totalActive >= 5);
+  return (rightEdge && centerActive && leftClear);
 }
 
 bool isLeftIntersection() {
@@ -161,14 +162,11 @@ bool isLeftIntersection() {
     }
   }
   
-  int leftActive = 0;
-  for(int i=5; i<=8; i++) { if(lineVals[i] > 500) leftActive++; }
+  bool leftEdge = (lineVals[6] > 500 && lineVals[7] > 500 && lineVals[8] > 500);
   bool centerActive = (lineVals[3] > 500 || lineVals[4] > 500 || lineVals[5] > 500);
+  bool rightClear = (lineVals[0] < 500 && lineVals[1] < 500);
   
-  int totalActive = 0;
-  for(int i=0; i<9; i++) { if(lineVals[i] > 500) totalActive++; }
-  
-  return (leftActive >= 3 && centerActive && totalActive >= 5);
+  return (leftEdge && centerActive && rightClear);
 }
 
 bool isTJunction() {
@@ -184,14 +182,11 @@ bool isTJunction() {
     }
   }
 
-  bool leftEdge = (lineVals[0] > 500 || lineVals[1] > 500 || lineVals[2] > 500);
-  bool rightEdge = (lineVals[6] > 500 || lineVals[7] > 500 || lineVals[8] > 500);
+  bool leftEdge = (lineVals[6] > 500 && lineVals[7] > 500 && lineVals[8] > 500);
+  bool rightEdge = (lineVals[0] > 500 && lineVals[1] > 500 && lineVals[2] > 500);
   bool centerActive = (lineVals[3] > 500 || lineVals[4] > 500 || lineVals[5] > 500);
   
-  int totalActive = 0;
-  for(int i=0; i<9; i++) { if(lineVals[i] > 500) totalActive++; }
-  
-  return (leftEdge && rightEdge && centerActive && totalActive >= 5);
+  return (leftEdge && rightEdge && centerActive);
 }
 
 bool readTagUID() {
@@ -381,7 +376,7 @@ void setup() {
     currentState = STATE_REVIVE_TARGET;
     sysLog("[BOOT] MODE: TASK 7/8 (REVIVAL)");
   } else {
-    currentState = STATE_ARENA_NAV;
+    currentState = STATE_BASE_NAV;
     sysLog("[BOOT] MODE: TASKS 1-6 (FULL SEQUENCE)");
   }
 }
@@ -582,7 +577,8 @@ void loop() {
       dr_lastIMUTime = now;
 
       float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-      if(abs(gyroZ) > 1.0) dr_currentYaw += gyroZ * dt; 
+      // FIX: Inverted the integration sign to -= to fix the positive feedback drift spiral
+      if(abs(gyroZ) > 1.0) dr_currentYaw -= gyroZ * dt; 
 
       float headingError = dr_targetYaw - dr_currentYaw;
       float correction = Kp_heading * headingError;
@@ -812,6 +808,7 @@ void loop() {
       snprintf(logBuf, sizeof(logBuf), "[AVOID] L:%d R:%d. Bypassing %s.", distL, distR, bypassLeft ? "LEFT" : "RIGHT");
       sysLog(logBuf);
 
+      // --- SUBSTATE 1: Turn outward 90 degrees ---
       executeTurn(90.0, bypassLeft);
       globalHeading += bypassLeft ? 90.0 : -90.0;
       normalizeHeading();
@@ -820,6 +817,11 @@ void loop() {
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       unsigned long bypassStart = millis();
       bool wallTrap = false;
+
+      // FIX: Injecting IMU Stabilization into Bypass loop
+      float bypass_targetYaw = globalHeading;
+      float bypass_currentYaw = globalHeading;
+      unsigned long bypass_lastIMUTime = micros();
 
       while(true) {
         updateUI();
@@ -837,11 +839,20 @@ void loop() {
           executeTurn(90.0, bypassLeft); 
           globalHeading += bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
+          bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           bypassStart = millis();
           pos1 = 0; pos2 = 0; 
         }
 
+        sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
+        unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
+        float gyroZ = (g.gyro.z - z_bias) * 57.2958;
+        if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
+        float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
+        setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
+
+        // FIX: Changed LiDAR check from 400 (4m) to 40 (40cm)
         int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
         if(distSide > 0 && distSide > 40 && (millis() - bypassStart > 800)) break;
         if (millis() - bypassStart > 4000) { wallTrap = true; break; }
@@ -862,6 +873,7 @@ void loop() {
       bTime = millis();
       while(millis() - bTime < 800) { updateUI(); delay(1); }
 
+      // --- SUBSTATE 2: Turn parallel to track ---
       sysLog("[AVOID] Object cleared. Turning parallel.");
       executeTurn(90.0, !bypassLeft);
       globalHeading += !bypassLeft ? 90.0 : -90.0;
@@ -870,6 +882,8 @@ void loop() {
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       bypassStart = millis();
       wallTrap = false;
+      
+      bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
 
       while(true) {
         updateUI();
@@ -887,12 +901,20 @@ void loop() {
           executeTurn(90.0, !bypassLeft); 
           globalHeading += !bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
+          bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           bypassStart = millis();
         }
 
+        sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
+        unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
+        float gyroZ = (g.gyro.z - z_bias) * 57.2958;
+        if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
+        float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
+        setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
+
         int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
-        if(distSide > 0 && distSide > 400 && (millis() - bypassStart > 800)) break;
+        if(distSide > 0 && distSide > 40 && (millis() - bypassStart > 800)) break;
         if (millis() - bypassStart > 4000) { wallTrap = true; break; }
         delay(5);
       }
@@ -910,6 +932,7 @@ void loop() {
       while(millis() - bTime < 800) { updateUI(); delay(1); }
       stopMotors();
 
+      // --- SUBSTATE 3: Turn inward to re-acquire the track ---
       sysLog("[AVOID] Returning to track axis using encoder memory.");
       executeTurn(90.0, !bypassLeft);
       globalHeading += !bypassLeft ? 90.0 : -90.0;
@@ -918,6 +941,8 @@ void loop() {
       pos1 = 0; pos2 = 0; 
       setMotors(baseSpeed_6V, baseSpeed_6V, 440);
       unsigned long lineSearchStart = millis();
+      
+      bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
       
       while (true) {
         updateUI();
@@ -948,13 +973,23 @@ void loop() {
           executeTurn(90.0, bypassLeft); 
           globalHeading += bypassLeft ? 90.0 : -90.0;
           normalizeHeading();
+          bypass_targetYaw = globalHeading; bypass_currentYaw = globalHeading; bypass_lastIMUTime = micros();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
           lineSearchStart = millis();
         }
+        
+        sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
+        unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
+        float gyroZ = (g.gyro.z - z_bias) * 57.2958;
+        if(abs(gyroZ) > 1.0) bypass_currentYaw -= gyroZ * dt;
+        float correction = Kp_heading * (bypass_targetYaw - bypass_currentYaw);
+        setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
+        
         delay(5);
       }
       stopMotors();
 
+      // --- SUBSTATE 4: Track found (or displacement reached). Align to original heading ---
       sysLog("[AVOID] Restoring original heading.");
       executeTurn(90.0, bypassLeft); 
       globalHeading = savedHeading; 

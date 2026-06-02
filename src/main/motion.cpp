@@ -89,7 +89,7 @@ void moveStraightDeadReckoning(long targetTicks) {
     lastIMUTime = now;
 
     float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-    if(abs(gyroZ) > 1.0) currentYaw += gyroZ * dt;
+    if(abs(gyroZ) > 1.0) currentYaw -= gyroZ * dt;
 
     float headingError = 0.0 - currentYaw;
     float correction = Kp_heading * headingError;

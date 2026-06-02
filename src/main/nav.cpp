@@ -63,7 +63,7 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
         if(correction > bSpeed * 0.5) correction = bSpeed * 0.5;
         if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
         
-        setMotors(bSpeed - correction, bSpeed + correction, maxPWM);
+        setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
         return true;
       } else {
         // Wall lost fallback: Drift gently left to re-engage surface footprint
