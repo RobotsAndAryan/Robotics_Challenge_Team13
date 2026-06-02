@@ -204,7 +204,6 @@ bool readTagUID() {
     stopMotors();
     strcpy(currentTag, tempTag);
     strcpy(lastScannedTag, currentTag);
-    
     lastError = 0.0;
     lostLineCount = 0;
     
@@ -431,16 +430,42 @@ void loop() {
       int navSpeed = (base_seq == 1 || base_seq == 3) ? baseSpeed_6V / 1.1 : baseSpeed_6V;
       int navMax = (base_seq == 1 || base_seq == 3) ? 440 : 500;
       
+      // FIX: Ramp gap FSM intervention. Stop swerving, drive straight.
+      if (base_seq == 3 && !isLineDetected()) {
+        sysLog("[NAV] Ramp gap detected. Dead reckoning to incline...");
+        dr_targetYaw = globalHeading; 
+        dr_currentYaw = globalHeading;
+        dr_lastIMUTime = micros();
+        unsigned long gapStart = millis();
+        
+        while (getPitch() >= -5.0) {
+            updateUI();
+            if(!robotEnabled() || (millis() - gapStart > 5000)) break; 
+            
+            sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
+            unsigned long now = micros(); float dt = (now - dr_lastIMUTime) / 1000000.0; dr_lastIMUTime = now;
+            float gyroZ = (g.gyro.z - z_bias) * 57.2958;
+            if(abs(gyroZ) > 1.0) dr_currentYaw -= gyroZ * dt;
+            
+            float correction = Kp_heading * (dr_targetYaw - dr_currentYaw);
+            setMotors(baseSpeed_6V - correction, baseSpeed_6V + correction, 440);
+            delay(5);
+        }
+        stopMotors();
+        if (getPitch() < -5.0) {
+            sysLog("[NAV] Ramp incline confirmed.");
+            currentState = STATE_RAMP_CLIMB;
+            pitchDownCount = 0;
+            flatGroundTime = 0;
+        }
+        break; // Escape the state so FSM handles the RAMP_CLIMB transition
+      }
+
       if (!executeLineFollow(navSpeed, navMax)) {
         if(++lostLineCount > 25) {
           stopMotors();
-          if (base_seq == 3) {
-            sysLog("[NAV] Track gap. Pushing blind toward ramp.");
-            moveStraightDeadReckoning(300); 
-          } else {
-            sysLog("[NAV] Track gap recovery push.");
-            moveForwardTicks(250); 
-          }
+          sysLog("[NAV] Track gap recovery push.");
+          moveForwardTicks(250); 
           lostLineCount = 0;
         }
       } else {

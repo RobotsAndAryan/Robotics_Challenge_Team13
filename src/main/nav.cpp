@@ -110,7 +110,7 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
         if(correction > bSpeed * 0.5) correction = bSpeed * 0.5;
         if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
         // FIX: Inverted motor logic. Right track must speed up to steer Left (away from right wall).
-        setMotors(bSpeed - correction, bSpeed + correction, maxPWM);
+        setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
         return true;
       } else {
         // Wall lost fallback: Drift slightly right to safely re-acquire it.
