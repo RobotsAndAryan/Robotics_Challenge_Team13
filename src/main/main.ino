@@ -21,6 +21,7 @@ volatile bool physical_enable = true;
 bool wifi_enable = false;      
 bool pathBlocked = false;
 
+// DYNAMIC NETWORK THROTTLE: Mutes the WiFi stack during IMU integration
 volatile bool is_turning = false;
 
 int enc1A = 44; int enc1B = 45;
@@ -32,13 +33,11 @@ int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
 float Kp_line = 20.0; float Kd_line = 5.0; 
-// FIX: Kp_wall reduced to stop track oscillation. Target is 13 cm.
 float Kp_wall = 12.0; float wall_target = 13.0; 
 float Kp_heading = 6.0;                        
 int baseSpeed_6V = 440; int baseSpeed_7V = 650; 
 int turning_spd = 750; 
 float lastError = 0;
-// FIX: ToF distance is mm, so 100mm = 10cm trigger threshold
 int obstacleThreshold = 100; 
 int lostLineCount = 0;
 int currentServoAngle = 0;
@@ -352,11 +351,12 @@ void setup() {
   if (imu.begin(0x68, &Wire1)) {
     imu.setGyroRange(MPU6050_RANGE_1000_DEG);
     float sum = 0;
-    for(int i=0; i<200; i++) {
+    // FIX: Boot optimization. Reduced from 1000ms to 200ms calibration time
+    for(int i=0; i<100; i++) {
       sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
-      sum += g.gyro.z; delay(5);
+      sum += g.gyro.z; delay(2);
     }
-    z_bias = sum / 200.0;
+    z_bias = sum / 100.0;
   }
   
   if (myToF.begin(0x29, Wire2)) { 
@@ -415,7 +415,7 @@ void loop() {
     checkFrontObstacle();
     if (pathBlocked) {
       stopMotors();
-      sysLog("[EVENT] Obstacle Detected - Engaging Sequence Bypass");
+      sysLog("[EVENT] Obstacle Detected - Engaging FSM Bypass");
       returnState = currentState; 
       currentState = STATE_OBSTACLE_AVOID;
       return;
@@ -428,7 +428,6 @@ void loop() {
     case STATE_BASE_NAV: {
       int navSpeed = (base_seq == 1 || base_seq == 3) ? baseSpeed_6V / 1.1 : baseSpeed_6V;
       int navMax = (base_seq == 1 || base_seq == 3) ? 440 : 500;
-      long currentDist = (abs(pos1) + abs(pos2)) / 2;
       
       if (!executeLineFollow(navSpeed, navMax)) {
         if(++lostLineCount > 25) {
@@ -444,8 +443,8 @@ void loop() {
         }
       } else {
         lostLineCount = 0;
+        long currentDist = (abs(pos1) + abs(pos2)) / 2;
         
-        // Mechanical Deadbands prevent false early triggers
         if (base_seq == 0 && currentDist > 500 && isTJunction()) {
           stopMotors();
           sysLog("[NAV] Junc 1: Aligning & Turning Left");
@@ -787,13 +786,12 @@ void loop() {
       }
       break;
 
-    // FIX: State-Machine Obstacle Avoidance to eliminate nested while-loop blocking
     case STATE_OBSTACLE_AVOID: {
       static int avoid_seq = 0;
       static bool bypassLeft = false;
       static long totalOutwardDistance = 0;
       static unsigned long stateTimer = 0;
-      static int parallelPhase = 0;
+      static int subPhase = 0; 
       static long clearTicks = 0;
       static float savedHeading = 0.0;
       
@@ -802,15 +800,23 @@ void loop() {
       static unsigned long bypass_lastIMUTime = 0;
 
       switch(avoid_seq) {
-        case 0: // Phase 0: Reverse and Evaluate
+        case 0: // Phase 0: Verify & Reverse
           savedHeading = globalHeading;
           totalOutwardDistance = 0;
+          
+          // Verify obstacle is real to prevent false positive aborts
+          checkFrontObstacle();
+          if(!pathBlocked) {
+             currentState = returnState;
+             break;
+          }
+          
           setMotors(-300, -300, 440);
           stateTimer = millis();
           avoid_seq = 1;
           break;
           
-        case 1: // Phase 1: Wait for reverse to finish and pick direction
+        case 1: // Phase 1: Wait for reverse to finish, pick direction
           if (millis() - stateTimer > 600) {
             stopMotors();
             int distL = getLidar(Wire, 0x10);
@@ -833,23 +839,38 @@ void loop() {
           bypass_currentYaw = globalHeading;
           bypass_lastIMUTime = micros();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+          subPhase = 0;
           avoid_seq = 3;
           break;
           
-        case 3: { // Phase 3: Drive Outward
+        case 3: { // Phase 3: Drive Outward (Dynamic Width)
           long currentOutward = (abs(pos1) + abs(pos2)) / 2;
           
-          if (currentOutward >= 800) {
-            totalOutwardDistance += currentOutward;
-            stopMotors();
-            stateTimer = millis(); // Small delay for mechanics to settle
-            avoid_seq = 4;
-            break;
+          int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
+          
+          if (subPhase == 0) {
+              if (distSide > 0 && distSide <= 40) {
+                  subPhase = 1; 
+              } else if (currentOutward > 500) {
+                  subPhase = 1; // Failsafe for thin obstacles
+              }
+          } else if (subPhase == 1) {
+              if (distSide > 40 || distSide <= 0) { 
+                  subPhase = 2;
+                  clearTicks = currentOutward;
+              }
+          } else if (subPhase == 2) {
+              if (currentOutward > (clearTicks + 450)) { // 450 ticks physical clearance
+                  totalOutwardDistance += currentOutward;
+                  stopMotors();
+                  stateTimer = millis();
+                  avoid_seq = 4;
+                  break;
+              }
           }
           
           checkFrontObstacle();
           if (pathBlocked) {
-            // Trapped moving outward! Failsafe abort.
             totalOutwardDistance += currentOutward;
             stopMotors();
             sysLog("[AVOID] Trapped moving outward. Aborting bypass.");
@@ -861,7 +882,6 @@ void loop() {
             break;
           }
           
-          // IMU Gyro Stabilization
           sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
           unsigned long now = micros(); float dt = (now - bypass_lastIMUTime) / 1000000.0; bypass_lastIMUTime = now;
           float gyroZ = (g.gyro.z - z_bias) * 57.2958;
@@ -881,42 +901,42 @@ void loop() {
             bypass_targetYaw = globalHeading;
             bypass_currentYaw = globalHeading;
             bypass_lastIMUTime = micros();
-            parallelPhase = 0;
+            subPhase = 0;
             setMotors(baseSpeed_6V, baseSpeed_6V, 440);
             avoid_seq = 5;
           }
           break;
           
-        case 5: { // Phase 5: Drive Parallel (With Chaining & LiDAR Phase tracking)
+        case 5: { // Phase 5: Drive Parallel (Dynamic Length & Chaining)
           long currentParallel = (abs(pos1) + abs(pos2)) / 2;
           
           checkFrontObstacle();
           if (pathBlocked) {
              sysLog("[AVOID] Secondary obstacle ahead! Chaining bypass wider.");
              stopMotors();
-             avoid_seq = 2; // Jump back to Phase 2 (Turn Outward again!)
+             avoid_seq = 2; // Chain loop back to turn outward
              break;
           }
 
-          // Sequential LiDAR phase tracking
           int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
           
-          if (parallelPhase == 0) {
-              if (distSide > 0 && distSide <= 40) { // Found the side of the block
-                  parallelPhase = 1; 
+          if (subPhase == 0) {
+              if (distSide > 0 && distSide <= 40) { 
+                  subPhase = 1; 
                   sysLog("[AVOID] Parallel: Obstacle side detected.");
+              } else if (currentParallel > 800) {
+                  subPhase = 1; 
               }
           } 
-          else if (parallelPhase == 1) {
-              if (distSide > 40 || distSide <= 0) { // Block has ended
-                  parallelPhase = 2; 
+          else if (subPhase == 1) {
+              if (distSide > 40 || distSide <= 0) { 
+                  subPhase = 2; 
                   clearTicks = currentParallel;
                   sysLog("[AVOID] Parallel: Sensor cleared obstacle. Pushing tail clearance.");
               }
           }
-          else if (parallelPhase == 2) {
-              // Wait for the physical length of the chassis to clear the block corner
-              if (currentParallel > (clearTicks + 600)) {
+          else if (subPhase == 2) {
+              if (currentParallel > (clearTicks + 600)) { // 600 ticks tail clearance
                   sysLog("[AVOID] Parallel: Tail clearance achieved.");
                   stopMotors();
                   stateTimer = millis();
@@ -989,7 +1009,7 @@ void loop() {
           normalizeHeading();          
           pathBlocked = false;             
           currentState = returnState;
-          avoid_seq = 0; // Reset for next obstacle
+          avoid_seq = 0; 
           break;
       }
       break; 
