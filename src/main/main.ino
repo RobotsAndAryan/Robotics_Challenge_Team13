@@ -40,7 +40,7 @@ int lostLineCount = 0;
 int currentServoAngle = 0;
 float z_bias = 0.0;
 
-// IMU Tracking Variables shifted to Global to prevent C++ Static Ghosting
+// IMU Tracking Variables shifted to Global
 float dr_targetYaw = 0.0;
 float dr_currentYaw = 0.0;
 unsigned long dr_lastIMUTime = 0;
@@ -411,7 +411,6 @@ void loop() {
 
   checkGlobalAbort();
 
-  // Safety bypass disabled during ramp to prevent false triggers from the floor slope
   if (currentState != STATE_REVIVE_TARGET && currentState != STATE_OBSTACLE_AVOID && 
       currentState != STATE_EXIT_SEQUENCE && currentState != STATE_DOCKED &&
       currentState != STATE_RAMP_CLIMB && currentState != STATE_RAMP_DECLINE) {
@@ -437,7 +436,7 @@ void loop() {
           stopMotors();
           if (base_seq == 3) {
             sysLog("[NAV] Track gap. Pushing blind toward ramp.");
-            moveForwardTicks(300); // Small push, not a blocking loop
+            moveForwardTicks(300); 
           } else {
             sysLog("[NAV] Track gap recovery push.");
             moveForwardTicks(250);
@@ -502,7 +501,6 @@ void loop() {
       }
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
-        // Capped at 400ms. 3000ms at 100% duty cycle would launch it into a wall.
         else if (millis() - flatGroundTime > 400) {
           sysLog("[NAV] Ramp cleared. Entering Arena.");
           currentState = STATE_ARENA_NAV;
@@ -527,12 +525,9 @@ void loop() {
         if(++lostLineCount > 10) {
           stopMotors();
           sysLog("[NAV] Line Lost. Transitioning to FSM Dead Reckoning.");
-          
-          // Secure the IMU state transition completely to avoid C++ ghost loops
           dr_targetYaw = globalHeading; 
           dr_currentYaw = globalHeading;
           dr_lastIMUTime = micros();
-          
           currentState = STATE_DEAD_RECKONING;
           lostLineCount = 0;
         }
@@ -541,8 +536,11 @@ void loop() {
       if (readTagUID()) {
         arenaTagCount++;
 
+        // Arena GPS Seeding fixed to (9,3) when crossing Airlock A
         if (arenaTagCount == 1) {
           currentX = 9; currentY = 3;
+          snprintf(logBuf, sizeof(logBuf), "[GPS] Entry Node Seeded at (%d, %d)", currentX, currentY);
+          sysLog(logBuf);
         }
 
         waitingForServer = true;
@@ -552,14 +550,14 @@ void loop() {
         char query[128]; snprintf(query, sizeof(query), "type=isFertile tag_id=%s board_id=%s", currentTag, BoardId);
         messenger.sendToBoard("server", query);
 
-        if (arenaTagCount == 2) {
-            sysLog("[NAV] Task 3: Turn Right at Node 2.");
-            turnAngle(90.0, false); // Fixed back to orthogonal 90
+        if (arenaTagCount == 3) {
+            sysLog("[NAV] Task 3: Turn Right at Node 3.");
+            turnAngle(90.0, false);
             globalHeading -= 90.0;
             normalizeHeading();
-        } else if (arenaTagCount == 3) {
-            sysLog("[NAV] Task 3: Turn Left at Node 3.");
-            turnAngle(90.0, true);  // Fixed back to orthogonal 90
+        } else if (arenaTagCount == 4) {
+            sysLog("[NAV] Task 3: Turn Left at Node 4.");
+            turnAngle(90.0, true);
             globalHeading += 90.0;
             normalizeHeading();
         }
@@ -575,12 +573,9 @@ void loop() {
       float dt = (now - dr_lastIMUTime) / 1000000.0;
       dr_lastIMUTime = now;
 
-      // Positive integration. CCW (left drift) increases currentYaw.
       float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-      if(abs(gyroZ) > 1.0) dr_currentYaw += gyroZ * dt; 
+      if(abs(gyroZ) > 1.0) dr_currentYaw += gyroZ * dt; // NOTE: If the robot spins continuously, flip this to -= 
 
-      // Left drift -> currentYaw grows. Error shrinks. Left motor increases. 
-      // Corrects the robot exactly back to the center line.
       float headingError = dr_targetYaw - dr_currentYaw;
       float correction = Kp_heading * headingError;
 
@@ -603,13 +598,13 @@ void loop() {
         char query[128]; snprintf(query, sizeof(query), "type=isFertile tag_id=%s board_id=%s", currentTag, BoardId);
         messenger.sendToBoard("server", query);
 
-        if (arenaTagCount == 2) {
-            sysLog("[NAV] Task 4: Turn Right at Node 2.");
+        if (arenaTagCount == 3) {
+            sysLog("[NAV] Task 4: Turn Right at Node 3.");
             turnAngle(90.0, false);
             globalHeading -= 90.0;
             normalizeHeading();
-        } else if (arenaTagCount == 3) {
-            sysLog("[NAV] Task 4: Turn Left at Node 3.");
+        } else if (arenaTagCount == 4) {
+            sysLog("[NAV] Task 4: Turn Left at Node 4.");
             turnAngle(90.0, true);
             globalHeading += 90.0;
             normalizeHeading();
@@ -755,7 +750,7 @@ void loop() {
         flatGroundTime = 0;
       } else if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
-        else if (millis() - flatGroundTime > 400) {
+        else if (millis() - flatGroundTime > 2000) {
           currentState = STATE_DOCKED;
         }
       } else flatGroundTime = 0;
@@ -929,7 +924,6 @@ void loop() {
       updateUI();
 
       if (clearance == 9999) {
-        setMotors(200, 200, 440);
         break;
       }
 
