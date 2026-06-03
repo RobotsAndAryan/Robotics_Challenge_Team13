@@ -373,7 +373,7 @@ void setup() {
     currentState = STATE_REVIVE_TARGET;
     sysLog("[BOOT] MODE: TASK 8 (REVIVAL)");
   } else {
-    currentState = STATE_BASE_NAV;
+    currentState = STATE_EXIT_SEQUENCE;
     sysLog("[BOOT] MODE: TASKS 1-6 (FULL SEQUENCE)");
   }
 }
