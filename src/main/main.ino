@@ -409,7 +409,7 @@ void loop() {
   checkGlobalAbort();
 
  // FIX: Explicitly separate the Stop logic (Base) from the Bypass logic (Arena)
-  if (currentState == STATE_ARENA_NAV || currentState == STATE_DEAD_RECKONING) {
+  if (currentState == STATE_ARENA_NAV) {
       checkFrontObstacle();
       if (pathBlocked) {
           stopMotors();
