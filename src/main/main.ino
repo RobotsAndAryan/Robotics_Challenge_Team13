@@ -32,9 +32,9 @@ int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
 float Kp_line = 30.0; float Kd_line = 5.0; 
-float Kp_wall = 40.0; float wall_target = 5.7; 
+float Kp_wall = 50.0; float wall_target = 5.4; 
 float Kp_heading = 30.0;                        
-int baseSpeed_6V = 440; int baseSpeed_7V = 610; 
+int baseSpeed_6V = 440; int baseSpeed_7V = 590; 
 int turning_spd = 600; 
 float lastError = 0;
 int obstacleThreshold = 100; 
@@ -52,7 +52,7 @@ RobotState lastLoggedState = (RobotState)-1;
 
 unsigned long missionStartTime = 0;
 bool missionActive = false;
-const unsigned long ABORT_TIME_MS = 240000; 
+const unsigned long ABORT_TIME_MS = 90000; 
 
 int base_seq = 0;
 int baseTagCount = 0;
@@ -103,6 +103,7 @@ const char* getStateName(RobotState state) {
     case STATE_AIRLOCK_WAIT_B: return "AIRLOCK_WAIT_B";
     case STATE_AIRLOCK_B_DECLINE: return "AIRLOCK_B_DECLINE";
     case STATE_DOCKED: return "DOCKED";
+    case STATE_OBSTACLE_STOP : return "OBSTACLE STOPPED";
     default: return "UNKNOWN";
   }
 }
@@ -258,8 +259,8 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     isFertileZone = strstr(msg, "fertile=true") != nullptr;
     waitingForServer = false;
     
-    char* xLoc = strstr(msg, "x=");
-    char* yLoc = strstr(msg, "y=");
+    char* yLoc = strstr(msg, "x=");
+    char* xLoc = strstr(msg, "y=");
     if (xLoc && yLoc) {
       currentX = atoi(xLoc + 2);
       currentY = atoi(yLoc + 2);
@@ -407,17 +408,26 @@ void loop() {
 
   checkGlobalAbort();
 
-  if (currentState != STATE_REVIVE_TARGET && currentState != STATE_OBSTACLE_AVOID && 
-      currentState != STATE_EXIT_SEQUENCE && currentState != STATE_DOCKED &&
-      currentState != STATE_RAMP_CLIMB && currentState != STATE_RAMP_DECLINE) {
-    checkFrontObstacle();
-    if (pathBlocked) {
-      stopMotors();
-      sysLog("[EVENT] Obstacle Detected - Engaging FSM Bypass");
-      returnState = currentState; 
-      currentState = STATE_OBSTACLE_AVOID;
-      return;
-    }
+ // FIX: Explicitly separate the Stop logic (Base) from the Bypass logic (Arena)
+  if (currentState == STATE_ARENA_NAV) {
+      checkFrontObstacle();
+      if (pathBlocked) {
+          stopMotors();
+          sysLog("[EVENT] Obstacle Detected - Stopping till clear");
+          returnState = currentState; 
+          currentState = STATE_OBSTACLE_AVOID;
+          return;
+      }
+  } 
+  else {
+      checkFrontObstacle();
+      if (pathBlocked) {
+          stopMotors();
+          sysLog("[EVENT] Obstacle Detected - Engaging FSM Bypass");
+          returnState = currentState; 
+          currentState = STATE_OBSTACLE_STOP;
+          return;
+      }
   }
 
   float pitch = getPitch();
@@ -496,13 +506,16 @@ void loop() {
     }
 
     case STATE_RAMP_CLIMB:
-      if (!executeWallFollow(baseSpeed_7V, 800, 1)) {
-        setMotors(baseSpeed_7V, baseSpeed_7V, 800); 
-      }
-      if (abs(pitch) < 5.0) {
-          currentState = STATE_ARENA_NAV;
-        }
-      } else flatGroundTime = 0;
+          if (!executeWallFollow(baseSpeed_7V, 800, 1)) {
+            setMotors(baseSpeed_7V, baseSpeed_7V, 800); 
+          }
+          if (abs(pitch) < 5.0) {
+            if (flatGroundTime == 0) flatGroundTime = millis();
+            else if (millis() - flatGroundTime > 100) {
+              sysLog("[NAV] Ramp cleared. Entering Arena.");
+              currentState = STATE_ARENA_NAV;
+            }
+          } else flatGroundTime = 0;
       break;
 
     case STATE_RAMP_DECLINE:
@@ -780,6 +793,18 @@ void loop() {
         flatGroundTime = 9999; 
       }
       break;
+
+    case STATE_OBSTACLE_STOP: {
+          stopMotors(); // Ensure motors do not creep
+          checkFrontObstacle();
+          
+          if (!pathBlocked) {
+            sysLog("[EVENT] Path clear. Resuming navigation.");
+            currentState = returnState;
+          }
+          
+          break; // FIX: Break MUST be outside the if-statement to prevent FSM fall-through!
+      }
 
     case STATE_OBSTACLE_AVOID: {
       static int avoid_seq = 0;
@@ -1074,6 +1099,5 @@ void loop() {
       stopMotors();
       break;
   }
-  
   delay(2); 
 }
