@@ -26,9 +26,9 @@ bool executeLineFollow(int bSpeed, int maxPWM) {
   }
 
   if (den == 0) {
-    int spinSpd = (bSpeed > 400) ? 350 : bSpeed; 
-    if (lastError > 0) setMotors(spinSpd, -spinSpd, maxPWM);
-    else if (lastError < 0) setMotors(-spinSpd, spinSpd, maxPWM);
+    // int spinSpd = (bSpeed > 400) ? 350 : bSpeed; 
+    // if (lastError > 0) setMotors(spinSpd, -spinSpd, maxPWM);
+    // else if (lastError < 0) setMotors(-spinSpd, spinSpd, maxPWM);
     return false; 
   }
 
@@ -64,7 +64,7 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
         setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
         return true;
       } else {
-        setMotors(bSpeed - 60, bSpeed + 60, maxPWM);
+        setMotors(bSpeed + 60, bSpeed - 60, maxPWM);
         return false;
       }
     }
@@ -108,7 +108,7 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
         if(correction > bSpeed * 0.5) correction = bSpeed * 0.5;
         if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
         
-        setMotors(bSpeed - correction, bSpeed + correction, maxPWM);
+        setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
         return true;
       } else {
         setMotors(bSpeed + 60, bSpeed - 60, maxPWM);

@@ -28,7 +28,7 @@ void turnAngle(float targetAngle, bool turnLeft) {
   int rSpeed = turnLeft ? turning_spd : -turning_spd;
 
   setMotors(lSpeed, rSpeed, 800);
-  float actualTarget = targetAngle + 4.0;
+  float actualTarget = targetAngle - 4.0;
   unsigned long turnStart = millis();
 
   while(abs(currentYaw) < actualTarget) {
@@ -43,7 +43,7 @@ void turnAngle(float targetAngle, bool turnLeft) {
     lastIMUTime = now;
     
     float gyroZ = (g.gyro.z - z_bias) * 57.2958;
-    if(abs(gyroZ) > 1.0) currentYaw -= gyroZ * dt; 
+    if(abs(gyroZ) > 1.0) currentYaw += gyroZ * dt; 
   }
 
   stopMotors();

@@ -31,11 +31,11 @@ int emitterOdd = 37; int emitterEven = 38;
 int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
-float Kp_line = 20.0; float Kd_line = 5.0; 
-float Kp_wall = 12.0; float wall_target = 130.0; 
-float Kp_heading = 6.0;                        
-int baseSpeed_6V = 440; int baseSpeed_7V = 650; 
-int turning_spd = 750; 
+float Kp_line = 30.0; float Kd_line = 5.0; 
+float Kp_wall = 40.0; float wall_target = 5.7; 
+float Kp_heading = 30.0;                        
+int baseSpeed_6V = 440; int baseSpeed_7V = 610; 
+int turning_spd = 600; 
 float lastError = 0;
 int obstacleThreshold = 100; 
 int lostLineCount = 0;
@@ -370,7 +370,7 @@ void setup() {
 
   if (digitalRead(REVIVAL_BUTTON_PIN) == LOW) {
     currentState = STATE_REVIVE_TARGET;
-    sysLog("[BOOT] MODE: TASK 7/8 (REVIVAL)");
+    sysLog("[BOOT] MODE: TASK 8 (REVIVAL)");
   } else {
     currentState = STATE_BASE_NAV;
     sysLog("[BOOT] MODE: TASKS 1-6 (FULL SEQUENCE)");
@@ -468,7 +468,7 @@ void loop() {
         airlockCleared = false;
         {
           unsigned long airlockWaitStart = millis();
-          while(!airlockCleared && millis() - airlockWaitStart < 2000) {
+          while(!airlockCleared && millis() - airlockWaitStart < 5000) {
             updateUI(); delay(10);
             if(!robotEnabled()) return;
           }
@@ -501,7 +501,7 @@ void loop() {
       }
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
-        else if (millis() - flatGroundTime > 400) {
+        else if (millis() - flatGroundTime > 100) {
           sysLog("[NAV] Ramp cleared. Entering Arena.");
           currentState = STATE_ARENA_NAV;
         }
@@ -509,8 +509,8 @@ void loop() {
       break;
 
     case STATE_RAMP_DECLINE:
-      if (!executeWallFollow(baseSpeed_6V, 440, 3)) {
-        setMotors(baseSpeed_6V, baseSpeed_6V, 440);
+      if (!executeWallFollow(baseSpeed_6V/1.2, 440, 3)) {
+        setMotors(baseSpeed_6V/1.2, baseSpeed_6V/1.2, 440);
       }
       if (abs(pitch) < 5.0) {
         if (flatGroundTime == 0) flatGroundTime = millis();
