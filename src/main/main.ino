@@ -500,9 +500,6 @@ void loop() {
         setMotors(baseSpeed_7V, baseSpeed_7V, 800); 
       }
       if (abs(pitch) < 5.0) {
-        if (flatGroundTime == 0) flatGroundTime = millis();
-        else if (millis() - flatGroundTime > 100) {
-          sysLog("[NAV] Ramp cleared. Entering Arena.");
           currentState = STATE_ARENA_NAV;
         }
       } else flatGroundTime = 0;
