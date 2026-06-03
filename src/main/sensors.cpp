@@ -1,4 +1,3 @@
-// sensors.cpp - abstract environmental filters
 #include "config.h"
 #include "sensors.h"
 #include <Arduino.h>

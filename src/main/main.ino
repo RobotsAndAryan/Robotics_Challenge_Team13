@@ -21,7 +21,6 @@ volatile bool physical_enable = true;
 bool wifi_enable = false;      
 bool pathBlocked = false;
 
-// DYNAMIC NETWORK THROTTLE: Mutes the WiFi stack during IMU integration
 volatile bool is_turning = false;
 
 int enc1A = 44; int enc1B = 45;
@@ -33,7 +32,7 @@ int linePins[] = {22,23,24,25,26,27,28,29,30};
 int weights[] = {40, 30, 20, 10, 0, -10, -20, -30, -40}; 
 
 float Kp_line = 20.0; float Kd_line = 5.0; 
-float Kp_wall = 12.0; float wall_target = 13.0; 
+float Kp_wall = 12.0; float wall_target = 130.0; 
 float Kp_heading = 6.0;                        
 int baseSpeed_6V = 440; int baseSpeed_7V = 650; 
 int turning_spd = 750; 
@@ -351,7 +350,6 @@ void setup() {
   if (imu.begin(0x68, &Wire1)) {
     imu.setGyroRange(MPU6050_RANGE_1000_DEG);
     float sum = 0;
-    // FIX: Boot optimization. Reduced from 1000ms to 200ms calibration time
     for(int i=0; i<100; i++) {
       sensors_event_t a, g, t; imu.getEvent(&a, &g, &t);
       sum += g.gyro.z; delay(2);
@@ -437,7 +435,7 @@ void loop() {
             moveStraightDeadReckoning(300); 
           } else {
             sysLog("[NAV] Track gap recovery push.");
-            moveForwardTicks(250); 
+            moveForwardTicks(400); 
           }
           lostLineCount = 0;
         }
@@ -447,17 +445,17 @@ void loop() {
         
         if (base_seq == 0 && currentDist > 500 && isTJunction()) {
           stopMotors();
-          sysLog("[NAV] Junc 1: Aligning & Turning Left");
+          sysLog("[NAV] Junc 1: Aligning & Turning Right");
           moveForwardTicks(450); 
-          executeTurn(90.0, true);
+          executeTurn(90.0, false);
           base_seq = 1;
           pos1 = 0; pos2 = 0;
         }
-        else if (base_seq == 2 && currentDist > 800 && (isTJunction() || isLeftIntersection())) {
+        else if (base_seq == 2 && currentDist > 800 && (isTJunction() || isRightIntersection())) {
           stopMotors();
-          sysLog("[NAV] Junc 2: Aligning & Turning Left");
+          sysLog("[NAV] Junc 2: Aligning & Turning Right again");
           moveForwardTicks(450); 
-          executeTurn(90.0, true); 
+          executeTurn(90.0, false); 
           base_seq = 3;
           pos1 = 0; pos2 = 0;
         }
@@ -470,7 +468,7 @@ void loop() {
         airlockCleared = false;
         {
           unsigned long airlockWaitStart = millis();
-          while(!airlockCleared && millis() - airlockWaitStart < 10000) {
+          while(!airlockCleared && millis() - airlockWaitStart < 2000) {
             updateUI(); delay(10);
             if(!robotEnabled()) return;
           }
@@ -791,7 +789,7 @@ void loop() {
       static bool bypassLeft = false;
       static long totalOutwardDistance = 0;
       static unsigned long stateTimer = 0;
-      static int subPhase = 0; 
+      static int parallelPhase = 0;
       static long clearTicks = 0;
       static float savedHeading = 0.0;
       
@@ -804,7 +802,6 @@ void loop() {
           savedHeading = globalHeading;
           totalOutwardDistance = 0;
           
-          // Verify obstacle is real to prevent false positive aborts
           checkFrontObstacle();
           if(!pathBlocked) {
              currentState = returnState;
@@ -839,28 +836,27 @@ void loop() {
           bypass_currentYaw = globalHeading;
           bypass_lastIMUTime = micros();
           setMotors(baseSpeed_6V, baseSpeed_6V, 440);
-          subPhase = 0;
+          parallelPhase = 0;
           avoid_seq = 3;
           break;
           
         case 3: { // Phase 3: Drive Outward (Dynamic Width)
           long currentOutward = (abs(pos1) + abs(pos2)) / 2;
-          
           int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
           
-          if (subPhase == 0) {
+          if (parallelPhase == 0) {
               if (distSide > 0 && distSide <= 40) {
-                  subPhase = 1; 
+                  parallelPhase = 1; 
               } else if (currentOutward > 500) {
-                  subPhase = 1; // Failsafe for thin obstacles
+                  parallelPhase = 1; // Failsafe
               }
-          } else if (subPhase == 1) {
+          } else if (parallelPhase == 1) {
               if (distSide > 40 || distSide <= 0) { 
-                  subPhase = 2;
+                  parallelPhase = 2;
                   clearTicks = currentOutward;
               }
-          } else if (subPhase == 2) {
-              if (currentOutward > (clearTicks + 450)) { // 450 ticks physical clearance
+          } else if (parallelPhase == 2) {
+              if (currentOutward > (clearTicks + 450)) {
                   totalOutwardDistance += currentOutward;
                   stopMotors();
                   stateTimer = millis();
@@ -901,7 +897,7 @@ void loop() {
             bypass_targetYaw = globalHeading;
             bypass_currentYaw = globalHeading;
             bypass_lastIMUTime = micros();
-            subPhase = 0;
+            parallelPhase = 0;
             setMotors(baseSpeed_6V, baseSpeed_6V, 440);
             avoid_seq = 5;
           }
@@ -920,23 +916,23 @@ void loop() {
 
           int distSide = bypassLeft ? getLidar(Wire1, 0x12) : getLidar(Wire, 0x10);
           
-          if (subPhase == 0) {
+          if (parallelPhase == 0) {
               if (distSide > 0 && distSide <= 40) { 
-                  subPhase = 1; 
+                  parallelPhase = 1; 
                   sysLog("[AVOID] Parallel: Obstacle side detected.");
               } else if (currentParallel > 800) {
-                  subPhase = 1; 
+                  parallelPhase = 1; 
               }
           } 
-          else if (subPhase == 1) {
+          else if (parallelPhase == 1) {
               if (distSide > 40 || distSide <= 0) { 
-                  subPhase = 2; 
+                  parallelPhase = 2; 
                   clearTicks = currentParallel;
                   sysLog("[AVOID] Parallel: Sensor cleared obstacle. Pushing tail clearance.");
               }
           }
-          else if (subPhase == 2) {
-              if (currentParallel > (clearTicks + 600)) { // 600 ticks tail clearance
+          else if (parallelPhase == 2) {
+              if (currentParallel > (clearTicks + 600)) { 
                   sysLog("[AVOID] Parallel: Tail clearance achieved.");
                   stopMotors();
                   stateTimer = millis();
@@ -1009,7 +1005,7 @@ void loop() {
           normalizeHeading();          
           pathBlocked = false;             
           currentState = returnState;
-          avoid_seq = 0; 
+          avoid_seq = 0; // Reset for next obstacle
           break;
       }
       break; 

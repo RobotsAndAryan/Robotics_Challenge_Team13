@@ -1,4 +1,3 @@
-// config.h - shared definitions and externs for all modules
 #pragma once
 #include <Wire.h>
 #include <Motoron.h>

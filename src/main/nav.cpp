@@ -49,9 +49,9 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
   switch(mode){
     case 1:{
       int distL = getLidar(Wire, 0x10);
-      if(distL <= 0 || distL > 90) distL = 99; // Lidar returns CM
+      if(distL <= 0 || distL > 90) distL = 99; 
 
-      if (distL < 35) { // 35cm
+      if (distL < 35) { 
         float wallError = wall_target - distL; 
         float D = wallError - lastWallError;
         lastWallError = wallError;
@@ -61,12 +61,10 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
         if(correction > bSpeed * 0.5) correction = bSpeed * 0.5;
         if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
         
-        // Inverted logic: If too close to left wall, speed up left motor to steer right.
         setMotors(bSpeed + correction, bSpeed - correction, maxPWM);
         return true;
       } else {
-        // Wall lost fallback: Drift slightly left to safely re-acquire it.
-        setMotors(bSpeed + 60, bSpeed - 60, maxPWM);
+        setMotors(bSpeed - 60, bSpeed + 60, maxPWM);
         return false;
       }
     }
@@ -109,12 +107,11 @@ bool executeWallFollow(int bSpeed, int maxPWM, int mode) {
         float correction = (Kp_wall * wallError) + (kd_w * D);
         if(correction > bSpeed * 0.5) correction = bSpeed * 0.5;
         if(correction < -bSpeed * 0.5) correction = -bSpeed * 0.5;
-        // Inverted logic: If too close to right wall, speed up right motor to steer left.
+        
         setMotors(bSpeed - correction, bSpeed + correction, maxPWM);
         return true;
       } else {
-        // Wall lost fallback: Drift slightly right to safely re-acquire it.
-        setMotors(bSpeed - 60, bSpeed + 60, maxPWM);
+        setMotors(bSpeed + 60, bSpeed - 60, maxPWM);
         return false;
       }
     }
